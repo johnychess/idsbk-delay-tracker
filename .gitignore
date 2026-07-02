@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# data lives on the Railway volume / locally, never in git
+data/*
+!data/.gitkeep
+reports/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
