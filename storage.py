@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS vyprava (
     poradie     TEXT NOT NULL,          -- "1", "2a", "51", ...
     vehicle     TEXT NOT NULL,          -- evidenčné číslo, e.g. "3319"
     fetched_at  TEXT NOT NULL,
+    confirmed   INTEGER,                -- 1 = imhd-verified, 0 = provisional
     UNIQUE (date, line, poradie, vehicle)
 );
 
@@ -108,6 +109,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
                       ("point_counts", "TEXT")):
         if col not in sweep_cols:
             conn.execute(f"ALTER TABLE sweeps ADD COLUMN {col} {decl}")
+    vyprava_cols = {row[1] for row in conn.execute("PRAGMA table_info(vyprava)")}
+    if "confirmed" not in vyprava_cols:
+        conn.execute("ALTER TABLE vyprava ADD COLUMN confirmed INTEGER")
     conn.commit()
 
 
@@ -138,11 +142,29 @@ def record_sweep(conn: sqlite3.Connection, ts: str, points_queried: int,
 
 def upsert_vyprava(conn: sqlite3.Connection, date: str,
                    entries: Iterable[tuple[str, str, str]], fetched_at: str) -> int:
-    """entries: iterable of (line, poradie, vehicle). Idempotent."""
+    """entries: iterable of (line, poradie, vehicle). Idempotent (append-only)."""
     cur = conn.executemany(
         "INSERT OR IGNORE INTO vyprava (date, line, poradie, vehicle, fetched_at)"
         " VALUES (?, ?, ?, ?, ?)",
         [(date, line, poradie, vehicle, fetched_at) for line, poradie, vehicle in entries],
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def replace_vyprava(conn: sqlite3.Connection, date: str,
+                    entries: Iterable[tuple[str, str, str]], fetched_at: str,
+                    confirmed: bool) -> int:
+    """Replace ALL rows for `date` with these entries, so a confirmed (or
+    corrected) roster overwrites an earlier provisional fetch. entries:
+    iterable of (line, poradie, vehicle)."""
+    conn.execute("DELETE FROM vyprava WHERE date = ?", (date,))
+    cur = conn.executemany(
+        "INSERT OR IGNORE INTO vyprava"
+        " (date, line, poradie, vehicle, fetched_at, confirmed)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        [(date, line, poradie, vehicle, fetched_at, int(confirmed))
+         for line, poradie, vehicle in entries],
     )
     conn.commit()
     return cur.rowcount

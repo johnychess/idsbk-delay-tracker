@@ -47,6 +47,16 @@ ENTRY_RE = re.compile(r"\b(\d{2,5})\s*/\s*(\d{1,2}[a-z]?)\b")
 # A line label: "1".."99", "N33", "X6", "212", "S65" ... short alnum token.
 LINE_RE = re.compile(r"^[A-ZŠČŽ]?\d{1,3}[A-Z]?$")
 
+# Present while a day is still provisional ("...recorded automatically and not
+# yet verified"); it disappears once imhd verifies the day. Absence of it (on a
+# page that actually has roster rows) means the day is confirmed/final.
+PROVISIONAL_MARKER = "neboli verifikovan"
+
+
+def is_confirmed(html: str) -> bool:
+    """True when the 'not yet verified' note is absent → the day is final."""
+    return PROVISIONAL_MARKER not in html.lower()
+
 
 def fetch_vyprava_html(day: date, session: requests.Session | None = None) -> str:
     sess = session or requests.Session()
@@ -94,11 +104,21 @@ def parse_vyprava(html: str) -> list[tuple[str, str, str]]:
     return results
 
 
-def collect_vyprava(conn, day: date, session: requests.Session | None = None) -> int:
-    """Fetch + parse + store one day. Returns number of newly stored rows."""
+def collect_vyprava(conn, day: date, session: requests.Session | None = None) -> bool:
+    """Fetch + parse + store one day, replacing any prior rows for that date so
+    a confirmation/correction overwrites an earlier provisional fetch. Returns
+    True if the stored day is confirmed (verified), False if still provisional.
+
+    If the page yields no entries (transient error / layout change), prior data
+    is left untouched and False is returned so the day stays unlocked."""
     html = fetch_vyprava_html(day, session=session)
     entries = parse_vyprava(html)
+    if not entries:
+        log.warning("výprava %s: 0 entries parsed; leaving any prior data intact", day)
+        return False
+    confirmed = is_confirmed(html)
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    stored = storage.upsert_vyprava(conn, day.isoformat(), entries, fetched_at)
-    log.info("výprava %s: parsed %d entries, %d new", day, len(entries), stored)
-    return stored
+    storage.replace_vyprava(conn, day.isoformat(), entries, fetched_at, confirmed)
+    log.info("výprava %s: %d entries stored (%s)", day, len(entries),
+             "confirmed" if confirmed else "provisional")
+    return confirmed

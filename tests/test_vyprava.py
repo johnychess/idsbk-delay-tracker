@@ -1,4 +1,5 @@
-from collector.vyprava import parse_vyprava
+import storage
+from collector.vyprava import is_confirmed, parse_vyprava
 
 HTML = """
 <html><body>
@@ -33,3 +34,30 @@ def test_parse_vyprava_lines_and_entries():
 
 def test_parse_vyprava_empty_page():
     assert parse_vyprava("<html><body>nothing here</body></html>") == []
+
+
+def test_is_confirmed():
+    provisional = ("<html><body><h2>Výprava ku dňu 5.7.2026 (nedeľa, včera)</h2>"
+                   "<p>Tieto údaje boli zaznamenané automatizovane a ešte "
+                   "neboli verifikované.</p></body></html>")
+    confirmed = ("<html><body><h2>Výprava ku dňu 4.7.2026 (sobota)</h2>"
+                 "<table><tr><td>3</td><td>7524/1</td></tr></table></body></html>")
+    assert is_confirmed(provisional) is False
+    assert is_confirmed(confirmed) is True
+
+
+def test_replace_vyprava_overwrites_provisional_with_confirmed(tmp_path):
+    conn = storage.connect(str(tmp_path / "t.sqlite"))
+    # provisional roster: circuit 22 was (wrongly) vehicle 9999
+    storage.replace_vyprava(conn, "2026-07-05", [("3", "22", "9999")],
+                            "2026-07-05T20:00:00Z", confirmed=False)
+    row = conn.execute("SELECT vehicle, confirmed FROM vyprava WHERE date='2026-07-05'"
+                       " AND poradie='22'").fetchone()
+    assert row == ("9999", 0)
+
+    # confirmed roster corrects it to 7533 — must overwrite, not accumulate
+    storage.replace_vyprava(conn, "2026-07-05", [("3", "22", "7533")],
+                            "2026-07-07T20:00:00Z", confirmed=True)
+    rows = conn.execute("SELECT vehicle, confirmed FROM vyprava WHERE date='2026-07-05'"
+                        " AND poradie='22'").fetchall()
+    assert rows == [("7533", 1)]  # single corrected, confirmed row
