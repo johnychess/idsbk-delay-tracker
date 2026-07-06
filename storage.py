@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS sweeps (
     points_queried  INTEGER,
     points_failed   INTEGER,
     vehicles_seen   INTEGER,
-    duration_s      REAL
+    duration_s      REAL,
+    max_point_count INTEGER,            -- most vehicles any single point returned
+    points_at_cap   INTEGER,            -- points that hit the 100-vehicle cap (saturated)
+    point_counts    TEXT                -- JSON array of per-point raw counts (null = failed)
 );
 CREATE INDEX IF NOT EXISTS idx_sweeps_ts ON sweeps (ts);
 
@@ -92,7 +95,20 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive migrations for DBs created before a column existed. SQLite
+    can't ALTER ... ADD COLUMN IF NOT EXISTS, so check pragma first."""
+    sweep_cols = {row[1] for row in conn.execute("PRAGMA table_info(sweeps)")}
+    for col, decl in (("max_point_count", "INTEGER"),
+                      ("points_at_cap", "INTEGER"),
+                      ("point_counts", "TEXT")):
+        if col not in sweep_cols:
+            conn.execute(f"ALTER TABLE sweeps ADD COLUMN {col} {decl}")
+    conn.commit()
 
 
 def insert_observations(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
@@ -106,11 +122,16 @@ def insert_observations(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
 
 
 def record_sweep(conn: sqlite3.Connection, ts: str, points_queried: int,
-                 points_failed: int, vehicles_seen: int, duration_s: float) -> None:
+                 points_failed: int, vehicles_seen: int, duration_s: float,
+                 max_point_count: int | None = None,
+                 points_at_cap: int | None = None,
+                 point_counts: str | None = None) -> None:
     conn.execute(
-        "INSERT INTO sweeps (ts, points_queried, points_failed, vehicles_seen, duration_s)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (ts, points_queried, points_failed, vehicles_seen, duration_s),
+        "INSERT INTO sweeps (ts, points_queried, points_failed, vehicles_seen,"
+        " duration_s, max_point_count, points_at_cap, point_counts)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, points_queried, points_failed, vehicles_seen, duration_s,
+         max_point_count, points_at_cap, point_counts),
     )
     conn.commit()
 

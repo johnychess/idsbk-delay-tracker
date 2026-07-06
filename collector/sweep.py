@@ -11,6 +11,7 @@ Endpoint quirks this module is built around (verified empirically):
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -81,6 +82,22 @@ def _as_int(value) -> int | None:
     return int(bool(value))
 
 
+# The endpoint returns at most this many vehicles per point (radius ignored).
+# A point that returns exactly this count is saturated: there were >= this many
+# vehicles within its reach and the rest were truncated. Watching for this is
+# how we know whether the tiling grid is dense enough in busy areas.
+VEHICLE_CAP = 100
+
+
+def summarize_points(point_counts: list[int | None]) -> tuple[int, int]:
+    """(max vehicles any point returned, number of points at the 100 cap).
+    None entries are failed points and are ignored."""
+    valid = [c for c in point_counts if c is not None]
+    max_count = max(valid) if valid else 0
+    at_cap = sum(1 for c in valid if c >= VEHICLE_CAP)
+    return max_count, at_cap
+
+
 def run_sweep(session: requests.Session,
               points: list[tuple[float, float]]) -> tuple[list[dict], dict]:
     """Query all points, dedupe by vehicle_id, return (rows, stats)."""
@@ -88,18 +105,30 @@ def run_sweep(session: requests.Session,
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     seen: dict[int, dict] = {}
     failed = 0
+    point_counts: list[int | None] = []  # raw count per point (None = failed)
 
     for i, (lat, lng) in enumerate(points):
         try:
-            for raw in fetch_point(session, lat, lng):
+            vehicles = fetch_point(session, lat, lng)
+            point_counts.append(len(vehicles))
+            for raw in vehicles:
                 row = parse_vehicle(raw, ts)
                 if row is not None and row["vehicle_id"] not in seen:
                     seen[row["vehicle_id"]] = row
         except Exception as exc:  # any single point failing must not kill the sweep
             failed += 1
+            point_counts.append(None)
             log.warning("point (%s, %s) failed: %s", lat, lng, exc)
         if i < len(points) - 1:
             time.sleep(config.INTER_POINT_DELAY_S)
+
+    max_point_count, points_at_cap = summarize_points(point_counts)
+    if points_at_cap:
+        log.warning(
+            "%d/%d points hit the %d-vehicle cap — coverage may be truncated in "
+            "dense areas; consider a denser grid (GRID_ROWS/GRID_COLS)",
+            points_at_cap, len(points), VEHICLE_CAP,
+        )
 
     stats = {
         "ts": ts,
@@ -107,5 +136,8 @@ def run_sweep(session: requests.Session,
         "points_failed": failed,
         "vehicles_seen": len(seen),
         "duration_s": round(time.monotonic() - started, 2),
+        "max_point_count": max_point_count,
+        "points_at_cap": points_at_cap,
+        "point_counts": json.dumps(point_counts),
     }
     return list(seen.values()), stats
