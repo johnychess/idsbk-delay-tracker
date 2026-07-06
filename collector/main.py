@@ -51,21 +51,38 @@ def _in_pause_window(now: datetime) -> bool:
 
 
 def _maybe_fetch_vyprava(conn, session) -> None:
-    """Fetch yesterday's table if missing (catch-up after downtime), and
-    today's once we are past the configured local hour. Re-fetching is
-    idempotent (INSERT OR IGNORE)."""
+    """Once a day (after the configured evening hour), re-fetch every recent
+    day that isn't confirmed yet.
+
+    imhd marks a fresh day "recorded automatically, not yet verified"; that
+    note disappears once the day is verified (~2 days later). We keep
+    re-fetching each unconfirmed day and overwrite it with the verified
+    roster the moment the note is gone, then lock it. Provisional data is
+    still stored meanwhile so nothing is lost — the confirmed version just
+    wins when it arrives."""
     now = _now_local()
-    for day in (now.date() - timedelta(days=1), now.date()):
-        if day == now.date() and now.hour < config.VYPRAVA_FETCH_HOUR:
-            continue
-        marker = f"vyprava_fetched_{day.isoformat()}"
-        if storage.get_meta(conn, marker):
-            continue
+    if now.hour < config.VYPRAVA_FETCH_HOUR:
+        return
+    checked_marker = f"vyprava_checked_{now.date().isoformat()}"
+    if storage.get_meta(conn, checked_marker):
+        return  # already did today's pass
+
+    fetched_any = False
+    for delta in range(config.VYPRAVA_LOOKBACK_DAYS + 1):
+        day = now.date() - timedelta(days=delta)
+        status_key = f"vyprava_status_{day.isoformat()}"
+        if storage.get_meta(conn, status_key) == "confirmed":
+            continue  # locked — verified roster already captured
+        if fetched_any:
+            time.sleep(config.INTER_POINT_DELAY_S)  # be a polite client
+        fetched_any = True
         try:
-            vyprava_mod.collect_vyprava(conn, day, session=session)
-            storage.set_meta(conn, marker, "1")
+            confirmed = vyprava_mod.collect_vyprava(conn, day, session=session)
+            storage.set_meta(conn, status_key,
+                             "confirmed" if confirmed else "provisional")
         except Exception:
-            log.exception("výprava fetch for %s failed; will retry next cycle", day)
+            log.exception("výprava fetch for %s failed; will retry", day)
+    storage.set_meta(conn, checked_marker, "1")
 
 
 def _maybe_refresh_gtfs(conn) -> None:
@@ -108,11 +125,14 @@ def main() -> None:
                 storage.insert_observations(conn, rows)
                 storage.record_sweep(conn, **stats)
                 log.info(
-                    "sweep: %d vehicles, %d/%d points ok, %.1fs",
+                    "sweep: %d vehicles, %d/%d points ok, %.1fs "
+                    "(busiest point %d, %d at cap)",
                     stats["vehicles_seen"],
                     stats["points_queried"] - stats["points_failed"],
                     stats["points_queried"],
                     stats["duration_s"],
+                    stats["max_point_count"],
+                    stats["points_at_cap"],
                 )
             except Exception:
                 log.exception("sweep failed; continuing")

@@ -128,10 +128,20 @@ GTFS_REFRESH_DAYS = int(os.environ.get("GTFS_REFRESH_DAYS", "7"))
 # Never touch imhd's login-gated /rt/ realtime endpoints.
 VYPRAVA_URL = os.environ.get("VYPRAVA_URL", "https://imhd.sk/ba/vyprava")
 
-# Fetch once per day after this local hour (assignments accumulate during
-# the day; late fetch = most complete table). Yesterday is re-fetched on
-# startup if missing.
+# Run the výprava pass once per day after this local hour (assignments
+# accumulate during the day; late fetch = most complete table).
 VYPRAVA_FETCH_HOUR = int(os.environ.get("VYPRAVA_FETCH_HOUR", "20"))
+
+# How many days back to keep re-checking for confirmation. imhd verifies a
+# day ~2 days later (the "not yet verified" note disappears); until then we
+# re-fetch it each day and overwrite with the verified roster once it lands.
+VYPRAVA_LOOKBACK_DAYS = int(os.environ.get("VYPRAVA_LOOKBACK_DAYS", "5"))
+
+# A day is never trusted as "confirmed" until it is at least this many days
+# old, even if the "not yet verified" note is absent. Guards against imhd
+# rewording the note (which would otherwise make every page read as verified
+# and lock same-day provisional data as final).
+VYPRAVA_MIN_CONFIRM_AGE_DAYS = int(os.environ.get("VYPRAVA_MIN_CONFIRM_AGE_DAYS", "2"))
 
 # --------------------------------------------------------------------------
 # Matching / analysis defaults
