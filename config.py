@@ -137,6 +137,12 @@ VYPRAVA_FETCH_HOUR = int(os.environ.get("VYPRAVA_FETCH_HOUR", "20"))
 # re-fetch it each day and overwrite with the verified roster once it lands.
 VYPRAVA_LOOKBACK_DAYS = int(os.environ.get("VYPRAVA_LOOKBACK_DAYS", "5"))
 
+# A day is never trusted as "confirmed" until it is at least this many days
+# old, even if the "not yet verified" note is absent. Guards against imhd
+# rewording the note (which would otherwise make every page read as verified
+# and lock same-day provisional data as final).
+VYPRAVA_MIN_CONFIRM_AGE_DAYS = int(os.environ.get("VYPRAVA_MIN_CONFIRM_AGE_DAYS", "2"))
+
 # --------------------------------------------------------------------------
 # Matching / analysis defaults
 # --------------------------------------------------------------------------

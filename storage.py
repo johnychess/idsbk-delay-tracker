@@ -140,18 +140,6 @@ def record_sweep(conn: sqlite3.Connection, ts: str, points_queried: int,
     conn.commit()
 
 
-def upsert_vyprava(conn: sqlite3.Connection, date: str,
-                   entries: Iterable[tuple[str, str, str]], fetched_at: str) -> int:
-    """entries: iterable of (line, poradie, vehicle). Idempotent (append-only)."""
-    cur = conn.executemany(
-        "INSERT OR IGNORE INTO vyprava (date, line, poradie, vehicle, fetched_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        [(date, line, poradie, vehicle, fetched_at) for line, poradie, vehicle in entries],
-    )
-    conn.commit()
-    return cur.rowcount
-
-
 def replace_vyprava(conn: sqlite3.Connection, date: str,
                     entries: Iterable[tuple[str, str, str]], fetched_at: str,
                     confirmed: bool) -> int:

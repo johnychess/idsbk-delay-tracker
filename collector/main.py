@@ -67,11 +67,15 @@ def _maybe_fetch_vyprava(conn, session) -> None:
     if storage.get_meta(conn, checked_marker):
         return  # already did today's pass
 
+    fetched_any = False
     for delta in range(config.VYPRAVA_LOOKBACK_DAYS + 1):
         day = now.date() - timedelta(days=delta)
         status_key = f"vyprava_status_{day.isoformat()}"
         if storage.get_meta(conn, status_key) == "confirmed":
             continue  # locked — verified roster already captured
+        if fetched_any:
+            time.sleep(config.INTER_POINT_DELAY_S)  # be a polite client
+        fetched_any = True
         try:
             confirmed = vyprava_mod.collect_vyprava(conn, day, session=session)
             storage.set_meta(conn, status_key,

@@ -1,5 +1,10 @@
+from datetime import datetime, timedelta
+from unittest.mock import patch
+
+import config
 import storage
-from collector.vyprava import is_confirmed, parse_vyprava
+from collector import vyprava as vyprava_mod
+from collector.vyprava import is_confirmed, note_absent, parse_vyprava
 
 HTML = """
 <html><body>
@@ -36,14 +41,51 @@ def test_parse_vyprava_empty_page():
     assert parse_vyprava("<html><body>nothing here</body></html>") == []
 
 
-def test_is_confirmed():
-    provisional = ("<html><body><h2>Výprava ku dňu 5.7.2026 (nedeľa, včera)</h2>"
-                   "<p>Tieto údaje boli zaznamenané automatizovane a ešte "
-                   "neboli verifikované.</p></body></html>")
-    confirmed = ("<html><body><h2>Výprava ku dňu 4.7.2026 (sobota)</h2>"
-                 "<table><tr><td>3</td><td>7524/1</td></tr></table></body></html>")
-    assert is_confirmed(provisional) is False
-    assert is_confirmed(confirmed) is True
+PROVISIONAL_HTML = ("<html><body><h2>Výprava ku dňu (nedeľa, včera)</h2>"
+                    "<p>Tieto údaje boli zaznamenané automatizovane a ešte "
+                    "neboli verifikované.</p>"
+                    "<table><tr><td>3</td><td>7524/1</td></tr></table></body></html>")
+NOTE_GONE_HTML = ("<html><body><h2>Výprava ku dňu (sobota)</h2>"
+                  "<table><tr><td>3</td><td>7524/1</td></tr></table></body></html>")
+
+
+def test_note_absent():
+    assert note_absent(PROVISIONAL_HTML) is False
+    assert note_absent(NOTE_GONE_HTML) is True
+    assert is_confirmed is note_absent  # back-compat alias
+
+
+def _collect_with(html, day, tmp_path):
+    conn = storage.connect(str(tmp_path / "t.sqlite"))
+    with patch.object(vyprava_mod, "fetch_vyprava_html", lambda d, session=None: html):
+        confirmed = vyprava_mod.collect_vyprava(conn, day)
+    stored = conn.execute("SELECT confirmed FROM vyprava WHERE date=?",
+                          (day.isoformat(),)).fetchall()
+    return confirmed, stored
+
+
+def test_confirmed_only_when_note_gone_and_old_enough(tmp_path):
+    today = datetime.now(config.LOCAL_TZ).date()
+    old_day = today - timedelta(days=config.VYPRAVA_MIN_CONFIRM_AGE_DAYS)
+    # note gone AND old enough -> confirmed
+    confirmed, stored = _collect_with(NOTE_GONE_HTML, old_day, tmp_path)
+    assert confirmed is True
+    assert stored == [(1,)]
+
+
+def test_fresh_day_never_confirmed_even_if_note_gone(tmp_path):
+    today = datetime.now(config.LOCAL_TZ).date()  # age 0 < MIN_CONFIRM_AGE_DAYS
+    # note gone but too fresh -> stays provisional (guards against reworded marker)
+    confirmed, stored = _collect_with(NOTE_GONE_HTML, today, tmp_path)
+    assert confirmed is False
+    assert stored == [(0,)]
+
+
+def test_note_present_is_provisional_regardless_of_age(tmp_path):
+    old_day = datetime.now(config.LOCAL_TZ).date() - timedelta(days=10)
+    confirmed, stored = _collect_with(PROVISIONAL_HTML, old_day, tmp_path)
+    assert confirmed is False
+    assert stored == [(0,)]
 
 
 def test_replace_vyprava_overwrites_provisional_with_confirmed(tmp_path):

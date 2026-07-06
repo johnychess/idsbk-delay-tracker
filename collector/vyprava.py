@@ -53,9 +53,18 @@ LINE_RE = re.compile(r"^[A-ZŠČŽ]?\d{1,3}[A-Z]?$")
 PROVISIONAL_MARKER = "neboli verifikovan"
 
 
-def is_confirmed(html: str) -> bool:
-    """True when the 'not yet verified' note is absent → the day is final."""
+def note_absent(html: str) -> bool:
+    """True when the 'not yet verified' note is gone from the page.
+
+    This is only the raw signal — collect_vyprava also age-gates it (a day
+    isn't trusted as confirmed until it's a couple of days old), so that a
+    reworded/removed marker can't silently lock fresh provisional data."""
     return PROVISIONAL_MARKER not in html.lower()
+
+
+# Back-compat alias: the raw note check. Prefer the age-gated decision in
+# collect_vyprava for "is this day final".
+is_confirmed = note_absent
 
 
 def fetch_vyprava_html(day: date, session: requests.Session | None = None) -> str:
@@ -116,7 +125,19 @@ def collect_vyprava(conn, day: date, session: requests.Session | None = None) ->
     if not entries:
         log.warning("výprava %s: 0 entries parsed; leaving any prior data intact", day)
         return False
-    confirmed = is_confirmed(html)
+
+    verified_note_gone = note_absent(html)
+    age_days = (datetime.now(config.LOCAL_TZ).date() - day).days
+    confirmed = verified_note_gone and age_days >= config.VYPRAVA_MIN_CONFIRM_AGE_DAYS
+    if verified_note_gone and not confirmed:
+        # The note is gone but the day is too fresh to have been verified —
+        # imhd may have reworded/removed the marker. Stay provisional and shout.
+        log.warning(
+            "výprava %s: verification note absent on a %d-day-old page — treating "
+            "as provisional; the imhd marker text may have changed (check %r)",
+            day, age_days, PROVISIONAL_MARKER,
+        )
+
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     storage.replace_vyprava(conn, day.isoformat(), entries, fetched_at, confirmed)
     log.info("výprava %s: %d entries stored (%s)", day, len(entries),
