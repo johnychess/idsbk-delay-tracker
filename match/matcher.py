@@ -106,10 +106,18 @@ def _load_candidates(conn: sqlite3.Connection, day: date,
 
     candidates = []
     for trip_id, direction_id, headsign in trips:
-        rows = profiles[trip_id]
+        rows = profiles[trip_id]  # already ordered by stop_sequence
         if not rows:
             continue
-        times = {seq: secs for seq, secs, _name in rows if secs is not None}
+        # Key by POSITION within the trip (1st stop, 2nd stop, …), NOT by raw
+        # stop_sequence. Bratislava's stop_sequence does not start at 1 — line
+        # 37 numbers its stops 17..40 — whereas the live feed's lastStopOrder
+        # is a 1-based position along the trip. Keying by sequence made every
+        # lookup miss; keying by position is what the live index maps onto.
+        times = {}
+        for position, (_seq, secs, _name) in enumerate(rows, start=1):
+            if secs is not None:
+                times[position] = secs
         candidates.append({
             "trip_id": trip_id,
             "direction_id": direction_id,
@@ -123,7 +131,8 @@ def _load_candidates(conn: sqlite3.Connection, day: date,
 def _score_trip(candidate: dict, observations: list[dict], day: date) -> float | None:
     """Median |estimated scheduled time - timetable time| across the run's
     observations, in seconds. None when the trip never covers the observed
-    stop sequences."""
+    stop positions. candidate["times"] is keyed by 1-based position within the
+    trip; STOP_ORDER_OFFSETS covers the live index being 0- or 1-based."""
     diffs = []
     for obs in observations:
         if obs["last_stop_order"] is None or obs["delay_minutes"] is None:

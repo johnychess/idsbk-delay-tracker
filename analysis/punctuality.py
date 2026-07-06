@@ -11,14 +11,14 @@ from __future__ import annotations
 import pandas as pd
 
 import config
+from analysis.filters import clean_direction
 
 
 def _direction(df: pd.DataFrame) -> pd.Series:
-    """Prefer the matched GTFS direction_id; fall back to the live
-    destination string so unmatched runs still group sensibly."""
-    if "direction_id" in df.columns:
-        return df["direction_id"].fillna("dest:" + df["destination"].fillna("?"))
-    return "dest:" + df["destination"].fillna("?")
+    """Group by the clean live destination (always present) rather than the
+    sparse matched direction_id, so a line isn't split into "0" / "dest:X"
+    pseudo-directions depending on which runs happened to match."""
+    return clean_direction(df["destination"])
 
 
 def attach_matches(df: pd.DataFrame, conn) -> pd.DataFrame:

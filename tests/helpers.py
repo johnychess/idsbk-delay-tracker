@@ -33,18 +33,26 @@ def make_db(path: str) -> sqlite3.Connection:
     return conn
 
 
+# Mirror the real Bratislava feed: stop_sequence does NOT start at 1. Line 37
+# numbers its stops 17..40. The matcher must map the live 1-based lastStopOrder
+# onto trip *position*, not raw stop_sequence — starting the base here at 17
+# turns test_matcher into a regression guard for that bug.
+STOP_SEQ_BASE = 17
+
+
 def add_trip(conn: sqlite3.Connection, trip_id: str, headsign: str,
              direction_id: str, first_dep_s: int, n_stops: int = 5,
              step_s: int = 300) -> None:
     """A trip departing at first_dep_s (seconds since midnight), one stop
-    every step_s."""
+    every step_s. stop_sequence runs STOP_SEQ_BASE..STOP_SEQ_BASE+n_stops-1."""
     conn.execute("INSERT INTO gtfs_trips VALUES (?, '37012', 'wd', ?, ?)",
                  (trip_id, headsign, direction_id))
-    for seq in range(1, n_stops + 1):
-        t = first_dep_s + (seq - 1) * step_s
+    for i in range(n_stops):
+        seq = STOP_SEQ_BASE + i
+        t = first_dep_s + i * step_s
         hms = f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
         conn.execute("INSERT INTO gtfs_stop_times VALUES (?, ?, ?, ?, ?)",
-                     (trip_id, hms, hms, f"S{min(seq, 5)}", str(seq)))
+                     (trip_id, hms, hms, f"S{min(i + 1, 5)}", str(seq)))
     conn.commit()
 
 

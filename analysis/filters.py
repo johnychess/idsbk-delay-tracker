@@ -58,6 +58,20 @@ def load_observations(conn: sqlite3.Connection,
     return df
 
 
+def clean_direction(destination: pd.Series) -> pd.Series:
+    """Derive a clean direction label from the live destination string.
+
+    The live feed always carries a destination (e.g. "Bratislava, Most SNP"),
+    so it is a far more reliable grouping key than the matched GTFS
+    direction_id, which is only present for runs that matched. Strips the
+    "Bratislava, " prefix; empty destinations become "?".
+    """
+    dest = (destination.fillna("")
+            .str.replace(r"^\s*Bratislava,\s*", "", regex=True)
+            .str.strip())
+    return dest.where(dest != "", "?")
+
+
 def _haversine_m(lat1, lng1, lat2, lng2):
     r = 6_371_000.0
     lat1, lng1, lat2, lng2 = map(np.radians, (lat1, lng1, lat2, lng2))

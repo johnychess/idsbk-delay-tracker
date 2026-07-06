@@ -63,9 +63,16 @@ def _grid_points(lat_min: float, lat_max: float, lng_min: float, lng_max: float,
     ]
 
 
-# ~16 well-spread points capture most of the ~350-370 active vehicles per
-# sweep; because vehicles move, repeated sweeps catch everything over time.
-NETWORK_POINTS = _grid_points(*BBOX, rows=4, cols=4)
+# A 5x5 grid (~25 points) captures most of the ~350-370 active vehicles per
+# sweep. Denser than 4x4 on purpose: because `radius` is ignored and each
+# point returns only its 100 nearest vehicles, sparse points let the dense
+# city centre "starve" the edges — the Záhorská Bystrica terminus (line 37's
+# origin) sat ~1.9 km from the nearest 4x4 point and its departures were
+# intermittently missed, inflating the missed-departure count. 5x5 puts a
+# point within ~0.8 km of that terminus. Still well under the 120 s budget.
+NETWORK_GRID = (int(os.environ.get("GRID_ROWS", "5")),
+                int(os.environ.get("GRID_COLS", "5")))
+NETWORK_POINTS = _grid_points(*BBOX, rows=NETWORK_GRID[0], cols=NETWORK_GRID[1])
 
 # Line-37 corridor (Záhorská Bystrica -> centre / Most SNP) for narrow focus.
 LINE37_POINTS = [
