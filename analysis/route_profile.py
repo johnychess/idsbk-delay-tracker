@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from analysis import filters
+
 
 def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
     """One row per observed segment traversal:
@@ -21,11 +23,7 @@ def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     df = df.dropna(subset=["delay_minutes", "last_stop_order"]).copy()
-    if "direction_id" in df.columns:
-        df["direction"] = df["direction_id"].fillna(
-            "dest:" + df["destination"].fillna("?"))
-    else:
-        df["direction"] = "dest:" + df["destination"].fillna("?")
+    df["direction"] = filters.clean_direction(df["destination"])
 
     rows = []
     for (service_date, vehicle_id), run in df.groupby(["service_date", "vehicle_id"]):
