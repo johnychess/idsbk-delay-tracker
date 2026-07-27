@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS matched_runs (
     UNIQUE (service_date, vehicle_id)
 );
 
+-- One row per distinct GTFS feed we have ever downloaded, identified by a
+-- hash of the zip. Feeds are ARCHIVED, never overwritten: a feed only
+-- declares service for its own validity window, so replacing it would make
+-- every earlier observation unmatchable (it did — see feed_for_date()).
+CREATE TABLE IF NOT EXISTS gtfs_feeds (
+    feed_id      TEXT PRIMARY KEY,      -- sha256 prefix of the zip bytes
+    downloaded_at TEXT NOT NULL,        -- when first seen
+    last_seen_at TEXT NOT NULL,         -- when last re-downloaded unchanged
+    start_date   TEXT,                  -- earliest calendar.start_date (YYYYMMDD)
+    end_date     TEXT,                  -- latest calendar.end_date
+    source_url   TEXT,
+    n_trips      INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -112,6 +126,54 @@ def _migrate(conn: sqlite3.Connection) -> None:
     vyprava_cols = {row[1] for row in conn.execute("PRAGMA table_info(vyprava)")}
     if "confirmed" not in vyprava_cols:
         conn.execute("ALTER TABLE vyprava ADD COLUMN confirmed INTEGER")
+    conn.commit()
+    _migrate_gtfs_feed_id(conn)
+
+
+GTFS_TABLES = ("gtfs_routes", "gtfs_trips", "gtfs_stops", "gtfs_stop_times",
+               "gtfs_calendar", "gtfs_calendar_dates")
+
+
+def _migrate_gtfs_feed_id(conn: sqlite3.Connection) -> None:
+    """Tag pre-archiving GTFS rows with a synthetic feed so they stay usable.
+
+    Before archiving existed the gtfs_* tables held exactly one feed, replaced
+    on every refresh. Give those rows a feed_id and register the feed with the
+    validity window read from its own calendar."""
+    existing = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gtfs_%'")}
+    legacy = [t for t in GTFS_TABLES if t in existing]
+    if not legacy:
+        return
+
+    tagged_any = False
+    for table in legacy:
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "feed_id" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN feed_id TEXT")
+            tagged_any = True
+    if not tagged_any:
+        return
+
+    untagged = conn.execute(
+        "SELECT COUNT(*) FROM gtfs_trips WHERE feed_id IS NULL").fetchone()[0]
+    if not untagged:
+        return
+
+    feed_id = "legacy"
+    for table in legacy:
+        conn.execute(f"UPDATE {table} SET feed_id = ? WHERE feed_id IS NULL",
+                     (feed_id,))
+    window = conn.execute(
+        "SELECT MIN(start_date), MAX(end_date) FROM gtfs_calendar").fetchone()
+    downloaded = get_meta(conn, "gtfs_downloaded_at") or "unknown"
+    conn.execute(
+        "INSERT OR REPLACE INTO gtfs_feeds"
+        " (feed_id, downloaded_at, last_seen_at, start_date, end_date,"
+        "  source_url, n_trips) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (feed_id, downloaded, downloaded, window[0], window[1],
+         get_meta(conn, "gtfs_source_url"), untagged),
+    )
     conn.commit()
 
 
@@ -156,6 +218,46 @@ def replace_vyprava(conn: sqlite3.Connection, date: str,
     )
     conn.commit()
     return cur.rowcount
+
+
+def gtfs_feed_exists(conn: sqlite3.Connection, feed_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM gtfs_feeds WHERE feed_id = ?",
+                        (feed_id,)).fetchone() is not None
+
+
+def register_gtfs_feed(conn: sqlite3.Connection, feed_id: str, downloaded_at: str,
+                       start_date: str | None, end_date: str | None,
+                       source_url: str, n_trips: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO gtfs_feeds (feed_id, downloaded_at, last_seen_at,"
+        " start_date, end_date, source_url, n_trips) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (feed_id, downloaded_at, downloaded_at, start_date, end_date,
+         source_url, n_trips),
+    )
+    conn.commit()
+
+
+def touch_gtfs_feed(conn: sqlite3.Connection, feed_id: str, seen_at: str) -> None:
+    conn.execute("UPDATE gtfs_feeds SET last_seen_at = ? WHERE feed_id = ?",
+                 (seen_at, feed_id))
+    conn.commit()
+
+
+def feed_for_date(conn: sqlite3.Connection, day) -> str | None:
+    """The archived feed that was in effect on `day`.
+
+    Picks the feed whose validity window covers the date; when several do,
+    the one with the latest start_date (the most recent applicable revision).
+    Returns None when no archived feed covers the date — callers must treat
+    that as "schedule unknown", NOT as "nothing was scheduled"."""
+    ymd = day.strftime("%Y%m%d")
+    row = conn.execute(
+        "SELECT feed_id FROM gtfs_feeds"
+        " WHERE start_date <= ? AND end_date >= ?"
+        " ORDER BY start_date DESC, downloaded_at DESC LIMIT 1",
+        (ymd, ymd),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:

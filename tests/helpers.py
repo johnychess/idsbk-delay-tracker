@@ -7,28 +7,39 @@ import sqlite3
 import storage
 
 
+# All synthetic GTFS rows belong to this archived feed.
+FEED_ID = "testfeed"
+
+
 def make_db(path: str) -> sqlite3.Connection:
     conn = storage.connect(path)
     conn.execute("CREATE TABLE gtfs_routes (route_id TEXT, route_short_name TEXT,"
-                 " route_long_name TEXT, route_type TEXT)")
+                 " route_long_name TEXT, route_type TEXT, feed_id TEXT)")
     conn.execute("CREATE TABLE gtfs_trips (trip_id TEXT, route_id TEXT,"
-                 " service_id TEXT, trip_headsign TEXT, direction_id TEXT)")
+                 " service_id TEXT, trip_headsign TEXT, direction_id TEXT,"
+                 " feed_id TEXT)")
     conn.execute("CREATE TABLE gtfs_stops (stop_id TEXT, stop_name TEXT,"
-                 " stop_lat TEXT, stop_lon TEXT)")
+                 " stop_lat TEXT, stop_lon TEXT, feed_id TEXT)")
     conn.execute("CREATE TABLE gtfs_stop_times (trip_id TEXT, arrival_time TEXT,"
-                 " departure_time TEXT, stop_id TEXT, stop_sequence TEXT)")
+                 " departure_time TEXT, stop_id TEXT, stop_sequence TEXT,"
+                 " feed_id TEXT)")
     conn.execute("CREATE TABLE gtfs_calendar (service_id TEXT, monday TEXT,"
                  " tuesday TEXT, wednesday TEXT, thursday TEXT, friday TEXT,"
-                 " saturday TEXT, sunday TEXT, start_date TEXT, end_date TEXT)")
+                 " saturday TEXT, sunday TEXT, start_date TEXT, end_date TEXT,"
+                 " feed_id TEXT)")
     conn.execute("CREATE TABLE gtfs_calendar_dates (service_id TEXT, date TEXT,"
-                 " exception_type TEXT)")
+                 " exception_type TEXT, feed_id TEXT)")
 
-    conn.execute("INSERT INTO gtfs_routes VALUES ('37012', '37', 'ZB - Most SNP', '3')")
+    conn.execute("INSERT INTO gtfs_routes VALUES"
+                 " ('37012', '37', 'ZB - Most SNP', '3', ?)", (FEED_ID,))
     conn.execute("INSERT INTO gtfs_calendar VALUES"
-                 " ('wd','1','1','1','1','1','0','0','20260101','20261231')")
+                 " ('wd','1','1','1','1','1','0','0','20260101','20261231',?)",
+                 (FEED_ID,))
     for i in range(1, 6):
-        conn.execute("INSERT INTO gtfs_stops VALUES (?, ?, ?, ?)",
-                     (f"S{i}", f"Stop {i}", "48.2", "17.05"))
+        conn.execute("INSERT INTO gtfs_stops VALUES (?, ?, ?, ?, ?)",
+                     (f"S{i}", f"Stop {i}", "48.2", "17.05", FEED_ID))
+    storage.register_gtfs_feed(conn, FEED_ID, "2026-01-01T00:00:00+01:00",
+                               "20260101", "20261231", "test://feed", 0)
     conn.commit()
     return conn
 
@@ -45,14 +56,14 @@ def add_trip(conn: sqlite3.Connection, trip_id: str, headsign: str,
              step_s: int = 300) -> None:
     """A trip departing at first_dep_s (seconds since midnight), one stop
     every step_s. stop_sequence runs STOP_SEQ_BASE..STOP_SEQ_BASE+n_stops-1."""
-    conn.execute("INSERT INTO gtfs_trips VALUES (?, '37012', 'wd', ?, ?)",
-                 (trip_id, headsign, direction_id))
+    conn.execute("INSERT INTO gtfs_trips VALUES (?, '37012', 'wd', ?, ?, ?)",
+                 (trip_id, headsign, direction_id, FEED_ID))
     for i in range(n_stops):
         seq = STOP_SEQ_BASE + i
         t = first_dep_s + i * step_s
         hms = f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
-        conn.execute("INSERT INTO gtfs_stop_times VALUES (?, ?, ?, ?, ?)",
-                     (trip_id, hms, hms, f"S{min(i + 1, 5)}", str(seq)))
+        conn.execute("INSERT INTO gtfs_stop_times VALUES (?, ?, ?, ?, ?, ?)",
+                     (trip_id, hms, hms, f"S{min(i + 1, 5)}", str(seq), FEED_ID))
     conn.commit()
 
 

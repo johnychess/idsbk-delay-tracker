@@ -28,6 +28,20 @@ STALE_MAX_DISPLACEMENT_M = 150.0
 # ...and never advancing along the route.
 STALE_MIN_OBS = 5
 
+# Second, independent stale test — "dead trip" detection.
+#
+# When a vehicle finishes but keeps its trip attached, scheduled progress
+# stops while the clock keeps running, so the reported delay grows by ~1
+# minute per minute of wall time. A genuinely delayed bus does not behave
+# like that for long: it recovers, or its delay plateaus. Runs whose delay
+# tracks wall-clock this closely are stale regardless of whether they drift
+# a few hundred metres (GPS noise, terminus repositioning), which is what the
+# displacement test above misses.
+DEAD_TRIP_MIN_SPAN_S = 20 * 60
+DEAD_TRIP_MIN_OBS = 6
+DEAD_TRIP_MIN_SLOPE = 0.8      # min of delay gained per min elapsed
+DEAD_TRIP_MIN_DELAY = 20       # only applies once the delay is already large
+
 
 def load_observations(conn: sqlite3.Connection,
                       since: str | None = None,
@@ -102,6 +116,31 @@ def flag_stale_runs(df: pd.DataFrame) -> pd.Series:
     return stale
 
 
+def flag_dead_trips(df: pd.DataFrame) -> pd.Series:
+    """Boolean Series: True for observations of runs whose reported delay
+    grows about as fast as wall-clock time — a finished vehicle still
+    carrying its trip. Catches the stale runs that drift too far for the
+    displacement test (which is why 60-90 min junk was surviving)."""
+    dead = pd.Series(False, index=df.index)
+    for _, group in df.groupby(["service_date", "vehicle_id"]):
+        if len(group) < DEAD_TRIP_MIN_OBS:
+            continue
+        group = group.sort_values("ts")
+        elapsed = (group["ts"] - group["ts"].iloc[0]).dt.total_seconds() / 60.0
+        delay = group["delay_minutes"].astype(float)
+        if elapsed.iloc[-1] * 60 < DEAD_TRIP_MIN_SPAN_S:
+            continue
+        if delay.max() < DEAD_TRIP_MIN_DELAY:
+            continue
+        if elapsed.var() == 0:
+            continue
+        # least-squares slope of delay vs elapsed minutes
+        slope = elapsed.cov(delay) / elapsed.var()
+        if slope >= DEAD_TRIP_MIN_SLOPE:
+            dead.loc[group.index] = True
+    return dead
+
+
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all dirty-data filters; returns a copy with a report attached
     in df.attrs['filter_report']."""
@@ -115,11 +154,15 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df[plausible]
     n1 = len(df)
     stale = flag_stale_runs(df)
-    df = df[~stale].copy()
+    df = df[~stale]
+    n2 = len(df)
+    dead = flag_dead_trips(df)
+    df = df[~dead].copy()
     df.attrs["filter_report"] = {
         "raw": n0,
         "dropped_implausible_delay": n0 - n1,
-        "dropped_stale_parked": n1 - len(df),
+        "dropped_stale_parked": n1 - n2,
+        "dropped_dead_trip": n2 - len(df),
         "kept": len(df),
     }
     return df
