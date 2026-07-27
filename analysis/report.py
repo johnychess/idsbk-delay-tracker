@@ -294,6 +294,19 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
             summary = (verdicts.groupby("verdict").size().rename("count")
                        .reset_index())
             sections.append(_md_table(summary))
+            approx_days = sorted(
+                verdicts.loc[~verdicts.get("feed_exact", True).astype(bool),
+                             "service_date"].unique()
+            ) if "feed_exact" in verdicts.columns else []
+            if approx_days:
+                sections.append(
+                    f"_`missed_unconfirmed`: {len(approx_days)} of these days "
+                    f"({approx_days[0]} … {approx_days[-1]}) have no GTFS feed "
+                    "of their own — the feed valid then was overwritten before "
+                    "archiving existed, so a neighbouring one stands in. A "
+                    "departure not found on a borrowed timetable may simply "
+                    "never have been scheduled, so those are never counted as "
+                    "confirmed misses._\n")
             hard_missed = verdicts[verdicts["verdict"] == "missed"]
             if not hard_missed.empty:
                 sections.append("### Departures that never appeared "

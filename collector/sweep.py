@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 
@@ -83,19 +84,81 @@ def _as_int(value) -> int | None:
 
 
 # The endpoint returns at most this many vehicles per point (radius ignored).
-# A point that returns exactly this count is saturated: there were >= this many
-# vehicles within its reach and the rest were truncated. Watching for this is
-# how we know whether the tiling grid is dense enough in busy areas.
 VEHICLE_CAP = 100
 
 
-def summarize_points(point_counts: list[int | None]) -> tuple[int, int]:
-    """(max vehicles any point returned, number of points at the 100 cap).
-    None entries are failed points and are ignored."""
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def nearest_neighbour_km(points: list[tuple[float, float]]) -> list[float]:
+    """Distance from each point to its closest sibling. A point only needs to
+    reach half of this to cover the territory between them."""
+    out = []
+    for i, (lat, lng) in enumerate(points):
+        others = [haversine_km(lat, lng, o_lat, o_lng)
+                  for j, (o_lat, o_lng) in enumerate(points) if j != i]
+        out.append(min(others) if others else float("inf"))
+    return out
+
+
+def point_reach_km(lat: float, lng: float, vehicles: list[dict]) -> float | None:
+    """How far this point had to look to fill its result — the distance to the
+    farthest vehicle it returned. None when it returned nothing."""
+    far = None
+    for raw in vehicles:
+        v_lat, v_lng = raw.get("latitude"), raw.get("longitude")
+        if v_lat is None or v_lng is None:
+            continue
+        d = haversine_km(lat, lng, v_lat, v_lng)
+        if far is None or d > far:
+            far = d
+    return far
+
+
+def summarize_points(point_counts: list[int | None],
+                     reaches: list[float | None] | None = None,
+                     nn_km: list[float] | None = None) -> dict:
+    """Coverage diagnosis for one sweep.
+
+    `points_at_cap` alone is NOT a coverage signal: with a few hundred
+    vehicles in a compact city, essentially every point returns its full 100
+    at any hour, so that counter tracks fleet size rather than data loss.
+
+    The signal that matters is REACH. A point that hits the cap has only
+    truncated something we care about if it also failed to see as far as the
+    midpoint to its nearest neighbouring point — i.e. it could not cover its
+    own cell, so vehicles in the gap between points were missed by both.
+    `points_undercovering` counts exactly that; when it is 0 the grid is
+    provably dense enough, however many points sat at the cap."""
     valid = [c for c in point_counts if c is not None]
     max_count = max(valid) if valid else 0
     at_cap = sum(1 for c in valid if c >= VEHICLE_CAP)
-    return max_count, at_cap
+
+    undercovering = 0
+    min_margin = None
+    if reaches is not None and nn_km is not None:
+        for count, reach, nn in zip(point_counts, reaches, nn_km):
+            if count is None or reach is None:
+                continue
+            required = nn / 2.0
+            margin = reach - required
+            if min_margin is None or margin < min_margin:
+                min_margin = margin
+            if count >= VEHICLE_CAP and margin < 0:
+                undercovering += 1
+
+    return {
+        "max_point_count": max_count,
+        "points_at_cap": at_cap,
+        "points_undercovering": undercovering,
+        "min_reach_margin_km": round(min_margin, 3) if min_margin is not None else None,
+    }
 
 
 def run_sweep(session: requests.Session,
@@ -106,11 +169,13 @@ def run_sweep(session: requests.Session,
     seen: dict[int, dict] = {}
     failed = 0
     point_counts: list[int | None] = []  # raw count per point (None = failed)
+    reaches: list[float | None] = []     # km to the farthest vehicle each returned
 
     for i, (lat, lng) in enumerate(points):
         try:
             vehicles = fetch_point(session, lat, lng)
             point_counts.append(len(vehicles))
+            reaches.append(point_reach_km(lat, lng, vehicles))
             for raw in vehicles:
                 row = parse_vehicle(raw, ts)
                 if row is not None and row["vehicle_id"] not in seen:
@@ -118,16 +183,17 @@ def run_sweep(session: requests.Session,
         except Exception as exc:  # any single point failing must not kill the sweep
             failed += 1
             point_counts.append(None)
+            reaches.append(None)
             log.warning("point (%s, %s) failed: %s", lat, lng, exc)
         if i < len(points) - 1:
             time.sleep(config.INTER_POINT_DELAY_S)
 
-    max_point_count, points_at_cap = summarize_points(point_counts)
-    if points_at_cap:
+    coverage = summarize_points(point_counts, reaches, nearest_neighbour_km(points))
+    if coverage["points_undercovering"]:
         log.warning(
-            "%d/%d points hit the %d-vehicle cap — coverage may be truncated in "
-            "dense areas; consider a denser grid (GRID_ROWS/GRID_COLS)",
-            points_at_cap, len(points), VEHICLE_CAP,
+            "%d/%d points were capped AND could not reach their own cell — the "
+            "grid is genuinely too sparse there; raise GRID_ROWS/GRID_COLS",
+            coverage["points_undercovering"], len(points),
         )
 
     stats = {
@@ -136,8 +202,12 @@ def run_sweep(session: requests.Session,
         "points_failed": failed,
         "vehicles_seen": len(seen),
         "duration_s": round(time.monotonic() - started, 2),
-        "max_point_count": max_point_count,
-        "points_at_cap": points_at_cap,
+        "max_point_count": coverage["max_point_count"],
+        "points_at_cap": coverage["points_at_cap"],
+        "points_undercovering": coverage["points_undercovering"],
+        "min_reach_margin_km": coverage["min_reach_margin_km"],
         "point_counts": json.dumps(point_counts),
+        "point_reach_km": json.dumps(
+            [round(r, 3) if r is not None else None for r in reaches]),
     }
     return list(seen.values()), stats

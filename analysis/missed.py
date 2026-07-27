@@ -42,7 +42,11 @@ def scheduled_departures(conn: sqlite3.Connection, day: date,
 
     Empty when no archived feed covers the date — the schedule is unknown, so
     the caller must not conclude anything was missed."""
-    feed_id = storage.feed_for_date(conn, day)
+    feed_id, feed_exact = storage.feed_for_date(
+        conn, day,
+        allow_nearest=config.GTFS_ALLOW_NEAREST_FEED,
+        max_gap_days=config.GTFS_NEAREST_FEED_MAX_GAP_DAYS,
+    )
     if feed_id is None:
         return pd.DataFrame()
     services = active_service_ids(conn, day, feed_id=feed_id)
@@ -70,6 +74,7 @@ def scheduled_departures(conn: sqlite3.Connection, day: date,
             "direction_id": direction_id,
             "headsign": headsign,
             "dep_seconds": secs,
+            "feed_exact": feed_exact,
         })
     return pd.DataFrame(data)
 
@@ -125,10 +130,15 @@ def missed_departures(conn: sqlite3.Connection, day: date,
             ).fetchone()[0]
             if fallback > 0:
                 verdict = "served_probably"  # someone left the origin in-window
-            elif _coverage_ok(conn, window_start, window_end):
-                verdict = "missed"
-            else:
+            elif not _coverage_ok(conn, window_start, window_end):
                 verdict = "unknown"  # collector wasn't reliably watching
+            elif not dep.get("feed_exact", True):
+                # The schedule for this date is a stand-in from a neighbouring
+                # feed. A departure we cannot find might simply not have been
+                # scheduled. Never assert a miss on borrowed timetable data.
+                verdict = "missed_unconfirmed"
+            else:
+                verdict = "missed"
 
         hh, mm = int(dep["dep_seconds"] // 3600), int(dep["dep_seconds"] % 3600 // 60)
         verdicts.append({
