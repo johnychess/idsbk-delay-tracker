@@ -42,6 +42,10 @@ log = logging.getLogger(__name__)
 # offsets per observation and keep the better one.
 STOP_ORDER_OFFSETS = (0, 1)
 
+# A backwards step of at least this many stops marks a new trip within the
+# same vehicleID (kept in sync with analysis.segments.RESET_MIN_DROP).
+SEGMENT_RESET_MIN_DROP = 2
+
 
 def normalize_text(text: str | None) -> str:
     """Lowercase, strip diacritics and punctuation — for headsign matching."""
@@ -183,7 +187,12 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
         where += " AND line = ?"
         params.append(line)
 
-    runs: dict[tuple[str, int], list[dict]] = {}
+    # Split each vehicle's day into individual trips. On weekdays the feed
+    # keeps one vehicleID for a whole duty, so without this a 15-trip shift
+    # would be pinned to a single trip_id (see analysis/segments.py).
+    runs: dict[tuple[str, int, int], list[dict]] = {}
+    prev_order: dict[tuple[str, int], int] = {}
+    seg_of: dict[tuple[str, int], int] = {}
     for ts, vehicle_id, obs_line, destination, last_stop_order, delay in conn.execute(
         f"""SELECT ts, vehicle_id, line, destination, last_stop_order, delay_minutes
             FROM observations WHERE {where} ORDER BY ts""",
@@ -191,7 +200,16 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
     ):
         if not obs_line:
             continue
-        runs.setdefault((obs_line, vehicle_id), []).append({
+        run_key = (obs_line, vehicle_id)
+        segment = seg_of.get(run_key, 0)
+        last = prev_order.get(run_key)
+        if (last is not None and last_stop_order is not None
+                and last_stop_order <= last - SEGMENT_RESET_MIN_DROP):
+            segment += 1  # stop order went backwards: a new trip began
+            seg_of[run_key] = segment
+        if last_stop_order is not None:
+            prev_order[run_key] = last_stop_order
+        runs.setdefault((obs_line, vehicle_id, segment), []).append({
             "ts": ts,
             "destination": destination,
             "last_stop_order": last_stop_order,
@@ -202,7 +220,7 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
     matched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     processed = 0
 
-    for (run_line, vehicle_id), observations in runs.items():
+    for (run_line, vehicle_id, segment), observations in runs.items():
         if run_line not in candidates_by_line:
             candidates_by_line[run_line] = _load_candidates(
                 conn, day, run_line, feed_id=feed_id)
@@ -227,15 +245,15 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
 
         conn.execute(
             """INSERT INTO matched_runs
-               (service_date, vehicle_id, line, destination, trip_id,
+               (service_date, vehicle_id, segment, line, destination, trip_id,
                 direction_id, poradie, score_s, n_obs, matched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT (service_date, vehicle_id) DO UPDATE SET
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (service_date, vehicle_id, segment) DO UPDATE SET
                  line=excluded.line, destination=excluded.destination,
                  trip_id=excluded.trip_id, direction_id=excluded.direction_id,
                  poradie=excluded.poradie, score_s=excluded.score_s,
                  n_obs=excluded.n_obs, matched_at=excluded.matched_at""",
-            (day.isoformat(), vehicle_id, run_line, destination, trip_id,
+            (day.isoformat(), vehicle_id, segment, run_line, destination, trip_id,
              direction_id, poradie, best_score, len(observations), matched_at),
         )
         processed += 1

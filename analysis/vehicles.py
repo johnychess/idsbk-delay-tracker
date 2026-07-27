@@ -24,7 +24,7 @@ from gtfs.poradie import normalize_poradie
 def vehicle_for_runs(conn: sqlite3.Connection) -> pd.DataFrame:
     """matched_runs enriched with the physical vehicle where unambiguous."""
     runs = pd.read_sql_query(
-        "SELECT service_date, vehicle_id, line, trip_id, direction_id, poradie"
+        "SELECT service_date, vehicle_id, segment, line, trip_id, direction_id, poradie"
         " FROM matched_runs WHERE trip_id IS NOT NULL AND poradie IS NOT NULL",
         conn,
     )
@@ -74,17 +74,28 @@ def vehicle_reliability(conn: sqlite3.Connection,
     if attributed.empty or observations.empty:
         return pd.DataFrame()
 
+    # Join per trip. A weekday duty is many trips under one vehicle_id, so
+    # joining on the run alone would fan every trip's attribution across the
+    # whole shift.
+    keys = ["service_date", "vehicle_id"]
+    if "segment" in observations.columns:
+        keys.append("segment")
+    else:
+        attributed = attributed[attributed["segment"] == 0]
     merged = observations.merge(
-        attributed[["service_date", "vehicle_id", "physical_vehicle"]],
-        on=["service_date", "vehicle_id"],
+        attributed[keys + ["physical_vehicle"]],
+        on=keys,
         how="inner",
         suffixes=("", "_attr"),
     ).dropna(subset=["delay_minutes"])
+    # Only the first trip of a duty has an unbiased delay level.
+    if "absolute_delay_ok" in merged.columns:
+        merged = merged[merged["absolute_delay_ok"]]
     if merged.empty:
         return pd.DataFrame()
 
     per_run = merged.groupby(
-        ["physical_vehicle", "service_date", "vehicle_id"]
+        ["physical_vehicle"] + keys
     )["delay_minutes"].median().reset_index()
 
     table = per_run.groupby("physical_vehicle").agg(

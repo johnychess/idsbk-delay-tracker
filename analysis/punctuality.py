@@ -24,7 +24,7 @@ def _direction(df: pd.DataFrame) -> pd.Series:
 def attach_matches(df: pd.DataFrame, conn) -> pd.DataFrame:
     """Left-join matched_runs onto observations by (service_date, vehicle_id)."""
     matches = pd.read_sql_query(
-        "SELECT service_date, vehicle_id, trip_id, direction_id, poradie"
+        "SELECT service_date, vehicle_id, segment, trip_id, direction_id, poradie"
         " FROM matched_runs",
         conn,
     )
@@ -32,14 +32,28 @@ def attach_matches(df: pd.DataFrame, conn) -> pd.DataFrame:
         for col in ("trip_id", "direction_id", "poradie"):
             df[col] = None
         return df
-    return df.merge(matches, on=["service_date", "vehicle_id"], how="left")
+    # Join per TRIP when the observations carry segments; otherwise fall back
+    # to the run-level key so the function still works on unsegmented input.
+    keys = ["service_date", "vehicle_id"]
+    if "segment" in df.columns:
+        keys.append("segment")
+    else:
+        matches = matches[matches["segment"] == 0]
+    return df.merge(matches.drop(columns=[c for c in ("segment",) if c not in keys]),
+                    on=keys, how="left")
 
 
 def punctuality_table(df: pd.DataFrame,
                       by_weekday: bool = True) -> pd.DataFrame:
-    """Aggregate delay distribution per (line, direction[, weekday], hour)."""
+    """Aggregate delay distribution per (line, direction[, weekday], hour).
+
+    Uses only observations whose delay LEVEL is unbiased (the first trip of a
+    duty). Later trips of a multi-trip duty carry an accumulated schedule
+    offset and would inflate every statistic here — see analysis/segments.py."""
     if df.empty:
         return pd.DataFrame()
+    if "absolute_delay_ok" in df.columns:
+        df = df[df["absolute_delay_ok"]]
     df = df.dropna(subset=["delay_minutes"]).copy()
     df["direction"] = _direction(df)
     keys = ["line", "direction"] + (["weekday"] if by_weekday else []) + ["hour"]

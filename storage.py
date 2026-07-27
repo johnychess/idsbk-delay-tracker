@@ -61,9 +61,12 @@ CREATE TABLE IF NOT EXISTS vyprava (
 );
 
 -- Result of the heuristic live->GTFS join (match/matcher.py).
+-- One row per TRIP, not per vehicleID: on weekdays the feed keeps a single
+-- vehicleID for a whole duty, so `segment` numbers the trips within it.
 CREATE TABLE IF NOT EXISTS matched_runs (
     service_date  TEXT NOT NULL,        -- local date YYYY-MM-DD
     vehicle_id    INTEGER NOT NULL,     -- live run instance
+    segment       INTEGER NOT NULL DEFAULT 0,  -- trip index within the duty
     line          TEXT,
     destination   TEXT,
     trip_id       TEXT,                 -- GTFS trip_id (NULL = no match within tolerance)
@@ -72,7 +75,7 @@ CREATE TABLE IF NOT EXISTS matched_runs (
     score_s       REAL,                 -- median schedule discrepancy of the winning trip
     n_obs         INTEGER,
     matched_at    TEXT NOT NULL,
-    UNIQUE (service_date, vehicle_id)
+    UNIQUE (service_date, vehicle_id, segment)
 );
 
 -- One row per distinct GTFS feed we have ever downloaded, identified by a
@@ -126,6 +129,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     vyprava_cols = {row[1] for row in conn.execute("PRAGMA table_info(vyprava)")}
     if "confirmed" not in vyprava_cols:
         conn.execute("ALTER TABLE vyprava ADD COLUMN confirmed INTEGER")
+    # matched_runs gained `segment` and a wider UNIQUE key. SQLite cannot
+    # alter a constraint, and the table is derived data the matcher rebuilds,
+    # so an old one is simply dropped and recreated from SCHEMA.
+    matched_cols = {row[1] for row in conn.execute("PRAGMA table_info(matched_runs)")}
+    if matched_cols and "segment" not in matched_cols:
+        conn.execute("DROP TABLE matched_runs")
+        conn.executescript(SCHEMA)
     conn.commit()
     _migrate_gtfs_feed_id(conn)
 

@@ -31,6 +31,13 @@ def run_split(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     df = df.dropna(subset=["delay_minutes"]).copy()
+    # Only the first trip of a duty has an unbiased delay level; later trips
+    # carry an accumulated schedule offset that would masquerade as inherited
+    # delay (see analysis/segments.py).
+    if "absolute_delay_ok" in df.columns:
+        df = df[df["absolute_delay_ok"]]
+    if df.empty:
+        return pd.DataFrame()
     rows = []
     for (service_date, vehicle_id), run in df.groupby(["service_date", "vehicle_id"]):
         run = run.sort_values("ts")

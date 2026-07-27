@@ -74,11 +74,13 @@ def _finish(ax, title: str, ylabel: str) -> None:
 
 def plot_delay_by_hour(df: pd.DataFrame, out_path: str) -> bool:
     """Median delay per hour, one line per direction, with a P10-P90 band."""
-    data = df.dropna(subset=["delay_minutes"]).copy()
+    data = df
+    if "absolute_delay_ok" in data.columns:
+        data = data[data["absolute_delay_ok"]]
+    data = data.dropna(subset=["delay_minutes"]).copy()
     if data.empty:
         return False
-    data["direction"] = data["direction_id"].fillna(
-        "dest:" + data["destination"].fillna("?"))
+    data["direction"] = filters.clean_direction(data["destination"])
     fig, ax = plt.subplots(figsize=(8, 4.2))
     colors = [PALETTE["series1"], PALETTE["series2"]]
     for i, (direction, grp) in enumerate(list(data.groupby("direction"))[:2]):
@@ -106,7 +108,10 @@ def plot_delay_by_hour(df: pd.DataFrame, out_path: str) -> bool:
 
 
 def plot_weekday_hour_heatmap(df: pd.DataFrame, out_path: str) -> bool:
-    data = df.dropna(subset=["delay_minutes"])
+    data = df
+    if "absolute_delay_ok" in data.columns:
+        data = data[data["absolute_delay_ok"]]
+    data = data.dropna(subset=["delay_minutes"])
     if data.empty:
         return False
     pivot = data.pivot_table(index="weekday", columns="hour",
@@ -203,10 +208,16 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
         f"# Punctuality report — line {line}",
         f"_Data: {freport.get('kept', 0)} observations kept — filtered out of "
         f"{freport.get('raw', 0)} raw: "
-        f"{freport.get('dropped_implausible_delay', 0)} implausible-delay, "
         f"{freport.get('dropped_stale_parked', 0)} stale/parked, "
-        f"{freport.get('dropped_dead_trip', 0)} dead-trip (delay growing with "
-        f"the clock)._\n",
+        f"{freport.get('dropped_dead_trip', 0)} frozen-trip, "
+        f"{freport.get('dropped_implausible_delay', 0)} implausible-delay._\n",
+        f"_Trips: {freport.get('trips', 0)} across {freport.get('runs', 0)} "
+        f"vehicle-days ({freport.get('multi_trip_runs', 0)} of which the feed "
+        f"reported as a single multi-trip duty). Delay LEVELS are read only "
+        f"from each duty's first trip ({freport.get('obs_absolute_ok', 0)} obs); "
+        f"the other {freport.get('obs_offset_affected', 0)} carry an "
+        f"accumulated schedule offset and are used only for delay-change "
+        f"analyses (bottlenecks)._\n",
     ]
 
     if df.empty:

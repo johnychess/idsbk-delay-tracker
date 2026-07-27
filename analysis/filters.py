@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 import config
+from analysis import segments
 
 # A run is considered stale/parked when it spans at least this long...
 STALE_MIN_SPAN_S = 30 * 60
@@ -72,6 +73,18 @@ def load_observations(conn: sqlite3.Connection,
     return df
 
 
+def _run_keys(df: pd.DataFrame) -> list:
+    """Group observations by trip when segments are known, else by run.
+
+    Grouping per trip matters: a normal multi-trip weekday duty must not be
+    judged as one long frozen run just because its reported delay climbs
+    across trip boundaries."""
+    keys = [df["service_date"], df["vehicle_id"]]
+    if "segment" in df.columns:
+        keys.append(df["segment"])
+    return keys
+
+
 def clean_direction(destination: pd.Series) -> pd.Series:
     """Derive a clean direction label from the live destination string.
 
@@ -98,7 +111,7 @@ def flag_stale_runs(df: pd.DataFrame) -> pd.Series:
     """Boolean Series (aligned to df.index): True for every observation of a
     run judged stale/parked for that whole service date."""
     stale = pd.Series(False, index=df.index)
-    for (_, _), group in df.groupby(["service_date", "vehicle_id"]):
+    for _, group in df.groupby(_run_keys(df)):
         if len(group) < STALE_MIN_OBS:
             continue
         span = (group["ts"].max() - group["ts"].min()).total_seconds()
@@ -122,7 +135,7 @@ def flag_dead_trips(df: pd.DataFrame) -> pd.Series:
     carrying its trip. Catches the stale runs that drift too far for the
     displacement test (which is why 60-90 min junk was surviving)."""
     dead = pd.Series(False, index=df.index)
-    for _, group in df.groupby(["service_date", "vehicle_id"]):
+    for _, group in df.groupby(_run_keys(df)):
         if len(group) < DEAD_TRIP_MIN_OBS:
             continue
         group = group.sort_values("ts")
@@ -143,26 +156,48 @@ def flag_dead_trips(df: pd.DataFrame) -> pd.Series:
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all dirty-data filters; returns a copy with a report attached
-    in df.attrs['filter_report']."""
+    in df.attrs['filter_report'].
+
+    Order matters. Segmentation runs FIRST, on complete runs, so trip
+    boundaries are detected before anything is removed. The absolute-delay cut
+    is then applied only where the reported level is meaningful — i.e. the
+    first trip of a duty. Later trips carry an accumulated schedule offset
+    (see analysis/segments.py), so cutting them on absolute value deleted
+    every weekday afternoon; they are kept, flagged, and used only by
+    increment-based analyses."""
     if df.empty:
         df.attrs["filter_report"] = {}
         return df
     n0 = len(df)
-    plausible = df["delay_minutes"].between(
-        config.MIN_PLAUSIBLE_DELAY_MIN, config.MAX_PLAUSIBLE_DELAY_MIN
-    ) | df["delay_minutes"].isna()
-    df = df[plausible]
-    n1 = len(df)
+
+    df = segments.assign_segments(df)
+    seg_stats = segments.summarize(df)
+
+    # Stale/parked and frozen-trip tests operate per trip, so a normal
+    # multi-trip duty is no longer mistaken for one runaway run.
     stale = flag_stale_runs(df)
     df = df[~stale]
-    n2 = len(df)
+    n1 = len(df)
     dead = flag_dead_trips(df)
-    df = df[~dead].copy()
-    df.attrs["filter_report"] = {
+    df = df[~dead]
+    n2 = len(df)
+
+    implausible = (
+        df["absolute_delay_ok"]
+        & df["delay_minutes"].notna()
+        & ~df["delay_minutes"].between(
+            config.MIN_PLAUSIBLE_DELAY_MIN, config.MAX_PLAUSIBLE_DELAY_MIN
+        )
+    )
+    df = df[~implausible].copy()
+
+    report = {
         "raw": n0,
-        "dropped_implausible_delay": n0 - n1,
-        "dropped_stale_parked": n1 - n2,
-        "dropped_dead_trip": n2 - len(df),
+        "dropped_stale_parked": n0 - n1,
+        "dropped_dead_trip": n1 - n2,
+        "dropped_implausible_delay": n2 - len(df),
         "kept": len(df),
     }
+    report.update(seg_stats)
+    df.attrs["filter_report"] = report
     return df
