@@ -72,35 +72,39 @@ def _local_seconds(ts_utc: str, service_day: date) -> float:
     return (local - midnight).total_seconds()
 
 
-def _load_candidates(conn: sqlite3.Connection, day: date,
-                     line: str) -> list[dict]:
+def _load_candidates(conn: sqlite3.Connection, day: date, line: str,
+                     feed_id: str | None = None) -> list[dict]:
     """All GTFS trips of `line` active on `day`, with their stop-time
     profiles: {trip_id, direction_id, headsign, last_stop_name,
-    times: {stop_sequence: departure_seconds}}."""
-    services = active_service_ids(conn, day)
+    times: {position_in_trip: departure_seconds}}."""
+    services = active_service_ids(conn, day, feed_id=feed_id)
     if not services:
         return []
     marks = ",".join("?" for _ in services)
+    feed_clause = " AND t.feed_id = ? AND r.feed_id = ?" if feed_id else ""
+    feed_args = (feed_id, feed_id) if feed_id else ()
     trips = conn.execute(
         f"""SELECT t.trip_id, t.direction_id, t.trip_headsign
             FROM gtfs_trips t
             JOIN gtfs_routes r ON r.route_id = t.route_id
-            WHERE r.route_short_name = ? AND t.service_id IN ({marks})""",
-        (line, *services),
+            WHERE r.route_short_name = ? AND t.service_id IN ({marks})
+            {feed_clause}""",
+        (line, *services, *feed_args),
     ).fetchall()
 
     if not trips:
         return []
     trip_marks = ",".join("?" for _ in trips)
     profiles: dict[str, list[tuple[int, int | None, str]]] = {t[0]: [] for t in trips}
+    st_feed_clause = " AND st.feed_id = ?" if feed_id else ""
     for trip_id, seq, dep, stop_name in conn.execute(
         f"""SELECT st.trip_id, CAST(st.stop_sequence AS INTEGER),
                    st.departure_time, COALESCE(s.stop_name, '')
             FROM gtfs_stop_times st
             LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
-            WHERE st.trip_id IN ({trip_marks})
+            WHERE st.trip_id IN ({trip_marks}){st_feed_clause}
             ORDER BY st.trip_id, CAST(st.stop_sequence AS INTEGER)""",
-        [t[0] for t in trips],
+        [t[0] for t in trips] + ([feed_id] if feed_id else []),
     ):
         profiles[trip_id].append((seq, gtfs_time_to_seconds(dep), stop_name))
 
@@ -155,7 +159,19 @@ def _score_trip(candidate: dict, observations: list[dict], day: date) -> float |
 
 def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> int:
     """Match every observed run on `day` (optionally one line) and upsert
-    into matched_runs. Returns the number of runs processed."""
+    into matched_runs. Returns the number of runs processed.
+
+    Refuses to run when no archived GTFS feed covers `day`: without a schedule
+    every run would "fail to match" and overwrite previously good results with
+    NULLs. That is a missing-schedule condition, not a no-match condition."""
+    feed_id = storage.feed_for_date(conn, day)
+    if feed_id is None:
+        log.warning(
+            "%s: no archived GTFS feed covers this date — skipping (existing "
+            "matches left intact). The feed valid then was replaced before "
+            "archiving existed; re-matching this date needs that feed.", day)
+        return 0
+
     day_local_start = datetime.combine(day, datetime.min.time(), tzinfo=config.LOCAL_TZ)
     start_utc = day_local_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end_utc = day_local_start.replace(hour=23, minute=59, second=59).astimezone(
@@ -188,7 +204,8 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
 
     for (run_line, vehicle_id), observations in runs.items():
         if run_line not in candidates_by_line:
-            candidates_by_line[run_line] = _load_candidates(conn, day, run_line)
+            candidates_by_line[run_line] = _load_candidates(
+                conn, day, run_line, feed_id=feed_id)
         destination = next((o["destination"] for o in observations if o["destination"]), "")
 
         best_trip, best_score = None, None

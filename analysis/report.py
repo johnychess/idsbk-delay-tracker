@@ -201,10 +201,12 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
 
     sections: list[str] = [
         f"# Punctuality report — line {line}",
-        f"_Data: {freport.get('kept', 0)} observations kept "
-        f"({freport.get('dropped_implausible_delay', 0)} implausible-delay and "
-        f"{freport.get('dropped_stale_parked', 0)} stale/parked rows filtered "
-        f"out of {freport.get('raw', 0)} raw)._\n",
+        f"_Data: {freport.get('kept', 0)} observations kept — filtered out of "
+        f"{freport.get('raw', 0)} raw: "
+        f"{freport.get('dropped_implausible_delay', 0)} implausible-delay, "
+        f"{freport.get('dropped_stale_parked', 0)} stale/parked, "
+        f"{freport.get('dropped_dead_trip', 0)} dead-trip (delay growing with "
+        f"the clock)._\n",
     ]
 
     if df.empty:

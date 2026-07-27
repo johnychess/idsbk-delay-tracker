@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 import config
+import storage
 from gtfs.loader import gtfs_time_to_seconds
 from gtfs.service_calendar import active_service_ids
 
@@ -37,20 +38,27 @@ ORIGIN_MAX_STOP_ORDER = 3
 def scheduled_departures(conn: sqlite3.Connection, day: date,
                          line: str) -> pd.DataFrame:
     """All scheduled origin departures of `line` on `day`:
-    trip_id, direction_id, headsign, departure seconds since local midnight."""
-    services = active_service_ids(conn, day)
+    trip_id, direction_id, headsign, departure seconds since local midnight.
+
+    Empty when no archived feed covers the date — the schedule is unknown, so
+    the caller must not conclude anything was missed."""
+    feed_id = storage.feed_for_date(conn, day)
+    if feed_id is None:
+        return pd.DataFrame()
+    services = active_service_ids(conn, day, feed_id=feed_id)
     if not services:
         return pd.DataFrame()
     marks = ",".join("?" for _ in services)
     rows = conn.execute(
         f"""SELECT t.trip_id, t.direction_id, t.trip_headsign,
                    (SELECT st.departure_time FROM gtfs_stop_times st
-                    WHERE st.trip_id = t.trip_id
+                    WHERE st.trip_id = t.trip_id AND st.feed_id = t.feed_id
                     ORDER BY CAST(st.stop_sequence AS INTEGER) LIMIT 1)
             FROM gtfs_trips t
-            JOIN gtfs_routes r ON r.route_id = t.route_id
-            WHERE r.route_short_name = ? AND t.service_id IN ({marks})""",
-        (line, *services),
+            JOIN gtfs_routes r ON r.route_id = t.route_id AND r.feed_id = t.feed_id
+            WHERE r.route_short_name = ? AND t.service_id IN ({marks})
+              AND t.feed_id = ?""",
+        (line, *services, feed_id),
     ).fetchall()
     data = []
     for trip_id, direction_id, headsign, dep in rows:
