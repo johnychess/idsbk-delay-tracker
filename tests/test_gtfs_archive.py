@@ -5,6 +5,7 @@ destroys existing matches."""
 from datetime import date
 
 import storage
+from gtfs.service_calendar import active_service_ids, resolve_service_date
 from match.matcher import match_date
 from tests.helpers import add_trip, make_db, obs_row
 
@@ -79,20 +80,46 @@ def test_match_date_without_feed_does_not_destroy_existing_matches(tmp_path):
     assert after[0] == "37012_03_5_18181"  # preserved, not NULLed
 
 
+def test_resolve_service_date_maps_to_nearest_same_weekday():
+    """A stand-in feed's calendar is bounded by its own validity window, so a
+    borrowed date must be looked up under a date the feed actually covers —
+    on the same weekday, or the service pattern would be wrong."""
+    conn = storage.connect(":memory:")
+    _register(conn, "summer", "20260724", "20261231", "2026-07-24T00:00:00+02:00")
+
+    # 2026-07-03 is a Friday; the first Friday the feed covers is 2026-07-24
+    assert resolve_service_date(conn, date(2026, 7, 3), "summer") == date(2026, 7, 24)
+    # 2026-07-04 Saturday -> 2026-07-25 Saturday
+    assert resolve_service_date(conn, date(2026, 7, 4), "summer") == date(2026, 7, 25)
+    # a covered date is returned untouched
+    assert resolve_service_date(conn, date(2026, 8, 3), "summer") == date(2026, 8, 3)
+    # past the end: map back to the last covered date of that weekday
+    after = resolve_service_date(conn, date(2027, 3, 10), "summer")
+    assert after <= date(2026, 12, 31)
+    assert after.weekday() == date(2027, 3, 10).weekday()
+
+
 def test_nearby_feed_recovers_the_date_and_marks_it_approximate(tmp_path):
     """Dates orphaned by the pre-archiving overwrite (July 3-23) are matched
-    against a neighbouring feed rather than lost — flagged, never silent."""
+    against a neighbouring feed rather than lost — flagged, never silent.
+
+    The calendar is bounded to the feed's own window here, reproducing the real
+    condition: selecting the feed alone yields zero services and zero matches."""
     conn = make_db(str(tmp_path / "t.sqlite"))
     add_trip(conn, "37012_03_5_18181", "Most SNP", "0", first_dep_s=6 * 3600)
     storage.insert_observations(conn, [
-        obs_row("2026-07-01T04:12:00Z", 111, last_stop_order=3, delay=2),
-        obs_row("2026-07-01T04:18:00Z", 111, last_stop_order=4, delay=3),
+        # 2026-07-03 is a Friday, mapped onto Friday 2026-07-24
+        obs_row("2026-07-03T04:12:00Z", 111, last_stop_order=3, delay=2),
+        obs_row("2026-07-03T04:18:00Z", 111, last_stop_order=4, delay=3),
     ])
-    # feed starts 10 days after the observation date: close enough to stand in
-    conn.execute("UPDATE gtfs_feeds SET start_date='20260711', end_date='20261231'")
+    conn.execute("UPDATE gtfs_feeds SET start_date='20260724', end_date='20261231'")
+    conn.execute("UPDATE gtfs_calendar SET start_date='20260724', end_date='20261231'")
     conn.commit()
 
-    assert match_date(conn, date(2026, 7, 1), line="37") == 1
+    # sanity: the borrowed date has no services under its own calendar window
+    assert active_service_ids(conn, date(2026, 7, 3), feed_id="testfeed") == set()
+
+    assert match_date(conn, date(2026, 7, 3), line="37") == 1
     trip_id, feed_exact = conn.execute(
         "SELECT trip_id, feed_exact FROM matched_runs WHERE vehicle_id=111"
     ).fetchone()

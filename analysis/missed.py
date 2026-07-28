@@ -27,7 +27,7 @@ import pandas as pd
 import config
 import storage
 from gtfs.loader import gtfs_time_to_seconds
-from gtfs.service_calendar import active_service_ids
+from gtfs.service_calendar import active_service_ids, resolve_service_date
 
 # Window must have at least this fraction of expected sweeps to judge a miss.
 MIN_COVERAGE = 0.8
@@ -49,7 +49,10 @@ def scheduled_departures(conn: sqlite3.Connection, day: date,
     )
     if feed_id is None:
         return pd.DataFrame()
-    services = active_service_ids(conn, day, feed_id=feed_id)
+    # A stand-in feed's calendar is bounded by its own validity window, so look
+    # services up under the nearest same-weekday date it covers.
+    service_day = day if feed_exact else resolve_service_date(conn, day, feed_id)
+    services = active_service_ids(conn, service_day, feed_id=feed_id)
     if not services:
         return pd.DataFrame()
     marks = ",".join("?" for _ in services)

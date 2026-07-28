@@ -34,7 +34,7 @@ import config
 import storage
 from gtfs.loader import gtfs_time_to_seconds
 from gtfs.poradie import normalize_poradie, poradie_from_trip_id
-from gtfs.service_calendar import active_service_ids
+from gtfs.service_calendar import active_service_ids, resolve_service_date
 
 log = logging.getLogger(__name__)
 
@@ -77,11 +77,16 @@ def _local_seconds(ts_utc: str, service_day: date) -> float:
 
 
 def _load_candidates(conn: sqlite3.Connection, day: date, line: str,
-                     feed_id: str | None = None) -> list[dict]:
+                     feed_id: str | None = None,
+                     service_day: date | None = None) -> list[dict]:
     """All GTFS trips of `line` active on `day`, with their stop-time
     profiles: {trip_id, direction_id, headsign, last_stop_name,
-    times: {position_in_trip: departure_seconds}}."""
-    services = active_service_ids(conn, day, feed_id=feed_id)
+    times: {position_in_trip: departure_seconds}}.
+
+    `service_day` overrides which date the service pattern is looked up under
+    — needed when a stand-in feed is being used, since its calendar only spans
+    its own validity window."""
+    services = active_service_ids(conn, service_day or day, feed_id=feed_id)
     if not services:
         return []
     marks = ",".join("?" for _ in services)
@@ -178,11 +183,15 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
             "%s: no archived GTFS feed covers this date and none is close "
             "enough to stand in — skipping (existing matches left intact).", day)
         return 0
+    service_day = day
     if not feed_exact:
+        # The stand-in feed's calendar only spans its own validity window, so
+        # look services up under the nearest same-weekday date it covers.
+        service_day = resolve_service_date(conn, day, feed_id)
         log.info(
             "%s: no feed covers this date (it was overwritten before archiving "
-            "existed); using nearest feed %s — results flagged approximate",
-            day, feed_id)
+            "existed); using nearest feed %s via %s — flagged approximate",
+            day, feed_id, service_day)
 
     day_local_start = datetime.combine(day, datetime.min.time(), tzinfo=config.LOCAL_TZ)
     start_utc = day_local_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -231,7 +240,7 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
     for (run_line, vehicle_id, segment), observations in runs.items():
         if run_line not in candidates_by_line:
             candidates_by_line[run_line] = _load_candidates(
-                conn, day, run_line, feed_id=feed_id)
+                conn, day, run_line, feed_id=feed_id, service_day=service_day)
         destination = next((o["destination"] for o in observations if o["destination"]), "")
 
         best_trip, best_score = None, None
