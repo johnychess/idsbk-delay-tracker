@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections.abc import Iterable
+from datetime import date
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -44,8 +45,11 @@ CREATE TABLE IF NOT EXISTS sweeps (
     vehicles_seen   INTEGER,
     duration_s      REAL,
     max_point_count INTEGER,            -- most vehicles any single point returned
-    points_at_cap   INTEGER,            -- points that hit the 100-vehicle cap (saturated)
-    point_counts    TEXT                -- JSON array of per-point raw counts (null = failed)
+    points_at_cap   INTEGER,            -- points that hit the 100-vehicle cap (NOT a coverage signal)
+    points_undercovering INTEGER,       -- capped AND unable to reach their own cell: real data loss
+    min_reach_margin_km REAL,           -- worst (reach - half-distance-to-nearest-point); <0 = gap
+    point_counts    TEXT,               -- JSON array of per-point raw counts (null = failed)
+    point_reach_km  TEXT                -- JSON array of per-point reach in km (null = failed)
 );
 CREATE INDEX IF NOT EXISTS idx_sweeps_ts ON sweeps (ts);
 
@@ -75,6 +79,7 @@ CREATE TABLE IF NOT EXISTS matched_runs (
     score_s       REAL,                 -- median schedule discrepancy of the winning trip
     n_obs         INTEGER,
     matched_at    TEXT NOT NULL,
+    feed_exact    INTEGER DEFAULT 1,    -- 0 = matched against a stand-in feed, approximate
     UNIQUE (service_date, vehicle_id, segment)
 );
 
@@ -123,7 +128,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     sweep_cols = {row[1] for row in conn.execute("PRAGMA table_info(sweeps)")}
     for col, decl in (("max_point_count", "INTEGER"),
                       ("points_at_cap", "INTEGER"),
-                      ("point_counts", "TEXT")):
+                      ("points_undercovering", "INTEGER"),
+                      ("min_reach_margin_km", "REAL"),
+                      ("point_counts", "TEXT"),
+                      ("point_reach_km", "TEXT")):
         if col not in sweep_cols:
             conn.execute(f"ALTER TABLE sweeps ADD COLUMN {col} {decl}")
     vyprava_cols = {row[1] for row in conn.execute("PRAGMA table_info(vyprava)")}
@@ -136,6 +144,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if matched_cols and "segment" not in matched_cols:
         conn.execute("DROP TABLE matched_runs")
         conn.executescript(SCHEMA)
+        matched_cols = {row[1] for row in conn.execute("PRAGMA table_info(matched_runs)")}
+    if matched_cols and "feed_exact" not in matched_cols:
+        conn.execute("ALTER TABLE matched_runs ADD COLUMN feed_exact INTEGER DEFAULT 1")
     conn.commit()
     _migrate_gtfs_feed_id(conn)
 
@@ -201,13 +212,18 @@ def record_sweep(conn: sqlite3.Connection, ts: str, points_queried: int,
                  points_failed: int, vehicles_seen: int, duration_s: float,
                  max_point_count: int | None = None,
                  points_at_cap: int | None = None,
-                 point_counts: str | None = None) -> None:
+                 points_undercovering: int | None = None,
+                 min_reach_margin_km: float | None = None,
+                 point_counts: str | None = None,
+                 point_reach_km: str | None = None) -> None:
     conn.execute(
         "INSERT INTO sweeps (ts, points_queried, points_failed, vehicles_seen,"
-        " duration_s, max_point_count, points_at_cap, point_counts)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        " duration_s, max_point_count, points_at_cap, points_undercovering,"
+        " min_reach_margin_km, point_counts, point_reach_km)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ts, points_queried, points_failed, vehicles_seen, duration_s,
-         max_point_count, points_at_cap, point_counts),
+         max_point_count, points_at_cap, points_undercovering,
+         min_reach_margin_km, point_counts, point_reach_km),
     )
     conn.commit()
 
@@ -253,13 +269,19 @@ def touch_gtfs_feed(conn: sqlite3.Connection, feed_id: str, seen_at: str) -> Non
     conn.commit()
 
 
-def feed_for_date(conn: sqlite3.Connection, day) -> str | None:
-    """The archived feed that was in effect on `day`.
+def feed_for_date(conn: sqlite3.Connection, day, allow_nearest: bool = False,
+                  max_gap_days: int | None = None) -> tuple[str | None, bool]:
+    """The archived feed to use for `day`, and whether it genuinely covers it.
 
-    Picks the feed whose validity window covers the date; when several do,
-    the one with the latest start_date (the most recent applicable revision).
-    Returns None when no archived feed covers the date — callers must treat
-    that as "schedule unknown", NOT as "nothing was scheduled"."""
+    Returns (feed_id, exact). `exact` is True when the feed's validity window
+    contains the date. When it does not and allow_nearest is set, the closest
+    feed by validity window is returned with exact=False — useful for dates
+    collected before feed archiving existed, where the real feed is gone but a
+    neighbouring one from the same service season is a good approximation.
+    Callers must record the distinction; a non-exact match is evidence about
+    the timetable, not proof of it.
+
+    Returns (None, False) when there is nothing to fall back to."""
     ymd = day.strftime("%Y%m%d")
     row = conn.execute(
         "SELECT feed_id FROM gtfs_feeds"
@@ -267,7 +289,30 @@ def feed_for_date(conn: sqlite3.Connection, day) -> str | None:
         " ORDER BY start_date DESC, downloaded_at DESC LIMIT 1",
         (ymd, ymd),
     ).fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0], True
+    if not allow_nearest:
+        return None, False
+    # Nearest by gap between the date and the feed's validity window, measured
+    # in real days so a month boundary isn't mistaken for a small distance.
+    best, best_gap = None, None
+    for feed_id, start, end in conn.execute(
+        "SELECT feed_id, start_date, end_date FROM gtfs_feeds"
+        " WHERE start_date IS NOT NULL AND end_date IS NOT NULL"
+    ):
+        try:
+            start_d = date(int(start[:4]), int(start[4:6]), int(start[6:8]))
+            end_d = date(int(end[:4]), int(end[4:6]), int(end[6:8]))
+        except (ValueError, TypeError):
+            continue
+        gap = max((start_d - day).days, (day - end_d).days, 0)
+        if best_gap is None or gap < best_gap:
+            best, best_gap = feed_id, gap
+    if best is None:
+        return None, False
+    if max_gap_days is not None and best_gap > max_gap_days:
+        return None, False
+    return best, False
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:

@@ -168,13 +168,21 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
     Refuses to run when no archived GTFS feed covers `day`: without a schedule
     every run would "fail to match" and overwrite previously good results with
     NULLs. That is a missing-schedule condition, not a no-match condition."""
-    feed_id = storage.feed_for_date(conn, day)
+    feed_id, feed_exact = storage.feed_for_date(
+        conn, day,
+        allow_nearest=config.GTFS_ALLOW_NEAREST_FEED,
+        max_gap_days=config.GTFS_NEAREST_FEED_MAX_GAP_DAYS,
+    )
     if feed_id is None:
         log.warning(
-            "%s: no archived GTFS feed covers this date — skipping (existing "
-            "matches left intact). The feed valid then was replaced before "
-            "archiving existed; re-matching this date needs that feed.", day)
+            "%s: no archived GTFS feed covers this date and none is close "
+            "enough to stand in — skipping (existing matches left intact).", day)
         return 0
+    if not feed_exact:
+        log.info(
+            "%s: no feed covers this date (it was overwritten before archiving "
+            "existed); using nearest feed %s — results flagged approximate",
+            day, feed_id)
 
     day_local_start = datetime.combine(day, datetime.min.time(), tzinfo=config.LOCAL_TZ)
     start_utc = day_local_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -246,15 +254,17 @@ def match_date(conn: sqlite3.Connection, day: date, line: str | None = None) -> 
         conn.execute(
             """INSERT INTO matched_runs
                (service_date, vehicle_id, segment, line, destination, trip_id,
-                direction_id, poradie, score_s, n_obs, matched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                direction_id, poradie, score_s, n_obs, matched_at, feed_exact)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (service_date, vehicle_id, segment) DO UPDATE SET
                  line=excluded.line, destination=excluded.destination,
                  trip_id=excluded.trip_id, direction_id=excluded.direction_id,
                  poradie=excluded.poradie, score_s=excluded.score_s,
-                 n_obs=excluded.n_obs, matched_at=excluded.matched_at""",
+                 n_obs=excluded.n_obs, matched_at=excluded.matched_at,
+                 feed_exact=excluded.feed_exact""",
             (day.isoformat(), vehicle_id, segment, run_line, destination, trip_id,
-             direction_id, poradie, best_score, len(observations), matched_at),
+             direction_id, poradie, best_score, len(observations), matched_at,
+             int(feed_exact)),
         )
         processed += 1
 

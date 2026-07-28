@@ -126,13 +126,13 @@ def main() -> None:
                 storage.record_sweep(conn, **stats)
                 log.info(
                     "sweep: %d vehicles, %d/%d points ok, %.1fs "
-                    "(busiest point %d, %d at cap)",
+                    "(coverage: %d undercovering, worst margin %s km)",
                     stats["vehicles_seen"],
                     stats["points_queried"] - stats["points_failed"],
                     stats["points_queried"],
                     stats["duration_s"],
-                    stats["max_point_count"],
-                    stats["points_at_cap"],
+                    stats["points_undercovering"],
+                    stats["min_reach_margin_km"],
                 )
             except Exception:
                 log.exception("sweep failed; continuing")

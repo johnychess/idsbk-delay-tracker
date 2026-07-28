@@ -120,6 +120,18 @@ GTFS_URL = os.environ.get(
 )
 GTFS_REFRESH_DAYS = int(os.environ.get("GTFS_REFRESH_DAYS", "7"))
 
+# Dates collected before feed archiving existed have no feed covering them —
+# the one valid then was overwritten. When set, such dates fall back to the
+# nearest archived feed (same service season is usually an excellent
+# approximation) and every result derived from it is flagged as approximate.
+# Set to 0 to leave those dates unmatched instead.
+GTFS_ALLOW_NEAREST_FEED = os.environ.get("GTFS_ALLOW_NEAREST_FEED", "1") == "1"
+
+# Refuse the fallback when the nearest feed's validity window is further than
+# this from the date — a different season's timetable is not evidence.
+GTFS_NEAREST_FEED_MAX_GAP_DAYS = int(
+    os.environ.get("GTFS_NEAREST_FEED_MAX_GAP_DAYS", "45"))
+
 # --------------------------------------------------------------------------
 # imhd.sk daily "výprava" (vehicle <-> poradie assignment)
 # --------------------------------------------------------------------------
