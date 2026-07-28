@@ -12,11 +12,48 @@ Sanity check from the brief: Mon 2026-06-22 should resolve to
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 WEEKDAY_COLUMNS = [
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
 ]
+
+
+def resolve_service_date(conn: sqlite3.Connection, day: date,
+                         feed_id: str) -> date:
+    """The date to look service patterns up under, for a feed being used as a
+    stand-in.
+
+    A borrowed feed's calendar rows are bounded by its own validity window, so
+    asking it about a date outside that window yields no services at all —
+    selecting the feed is not enough. Map the date onto the NEAREST date the
+    feed does cover that falls on the same weekday (3 Jul Friday -> 24 Jul
+    Friday). That preserves the weekday service pattern and cannot mix two
+    seasons together, which a plain weekday-flag lookup would risk when a feed
+    carries several date-bounded service sets.
+
+    Returns `day` unchanged when the feed already covers it.
+
+    Caveat: public-holiday exceptions belong to actual dates, so a borrowed
+    date inherits the surrogate's holiday status, not its own."""
+    row = conn.execute(
+        "SELECT start_date, end_date FROM gtfs_feeds WHERE feed_id = ?",
+        (feed_id,),
+    ).fetchone()
+    if not row or not row[0] or not row[1]:
+        return day
+    try:
+        start = date(int(row[0][:4]), int(row[0][4:6]), int(row[0][6:8]))
+        end = date(int(row[1][:4]), int(row[1][4:6]), int(row[1][6:8]))
+    except (ValueError, TypeError):
+        return day
+    if start <= day <= end:
+        return day
+    if day < start:
+        # first covered date on the same weekday
+        return start + timedelta(days=(day.weekday() - start.weekday()) % 7)
+    # last covered date on the same weekday
+    return end - timedelta(days=(end.weekday() - day.weekday()) % 7)
 
 
 def active_service_ids(conn: sqlite3.Connection, day: date,
