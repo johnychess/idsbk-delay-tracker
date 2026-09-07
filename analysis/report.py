@@ -26,7 +26,8 @@ from matplotlib.colors import LinearSegmentedColormap
 
 import config
 import storage
-from analysis import filters, inherited, missed, punctuality, route_profile, vehicles
+from analysis import (filters, inherited, missed, punctuality, route_profile,
+                      snapshot, vehicles)
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ def _md_table(df: pd.DataFrame, max_rows: int = 20) -> str:
 
 
 def build_report(db_path: str, line: str, since: str | None, until: str | None,
-                 out_dir: str) -> str:
+                 out_dir: str, label: str | None = None) -> str:
     conn = storage.connect(db_path)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -248,6 +249,18 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
         bottlenecks = route_profile.bottleneck_table(increments)
         sections.append("## 2. Bottleneck segments (delay gained per stop)\n")
         sections.append(_md_table(bottlenecks))
+        per_km = route_profile.by_distance(bottlenecks)
+        if not per_km.empty:
+            sections.append("### The same segments ranked per KILOMETRE\n")
+            sections.append(
+                "Minutes-per-stop rewards long gaps between stops: a segment "
+                "crossing 2 km of open road is expected to cost more than one "
+                "crossing 200 m. `km_per_stop` shows how far apart these stops "
+                "actually are. **A segment near the top of both tables is a "
+                "real bottleneck; one that tops only the per-stop table is "
+                "explained by stop spacing.** Distances are straight-line "
+                "between fixes, so they understate road distance.\n")
+            sections.append(_md_table(per_km))
         map_path = route_profile.bottleneck_map(
             bottlenecks, os.path.join(out_dir, "bottleneck_map.html"))
         if map_path:
@@ -346,6 +359,15 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(sections))
     log.info("report written to %s", report_path)
+
+    # Always freeze the numbers next to the prose. The markdown is for reading;
+    # this is what a later window can actually be compared against, and writing
+    # it unconditionally means the baseline exists without anyone remembering
+    # to ask for it.
+    snapshot.save(
+        snapshot.build_snapshot(conn, line, since, until, label=label,
+                                df=df, filter_report=freport),
+        os.path.join(out_dir, "snapshot.json"))
     return report_path
 
 
@@ -357,10 +379,14 @@ def main() -> None:
     parser.add_argument("--since", default=None, help="UTC ISO lower bound, e.g. 2026-07-01")
     parser.add_argument("--until", default=None, help="UTC ISO upper bound")
     parser.add_argument("--out", default=None, help="output directory")
+    parser.add_argument("--label", default=None,
+                        help="human name for this window, recorded in "
+                             "snapshot.json, e.g. 'school holidays 2026'")
     args = parser.parse_args()
 
     out_dir = args.out or os.path.join("reports", f"line{args.line}")
-    build_report(args.db, args.line, args.since, args.until, out_dir)
+    build_report(args.db, args.line, args.since, args.until, out_dir,
+                 label=args.label)
 
 
 if __name__ == "__main__":

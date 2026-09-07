@@ -99,7 +99,7 @@ def clean_direction(destination: pd.Series) -> pd.Series:
     return dest.where(dest != "", "?")
 
 
-def _haversine_m(lat1, lng1, lat2, lng2):
+def haversine_m(lat1, lng1, lat2, lng2):
     r = 6_371_000.0
     lat1, lng1, lat2, lng2 = map(np.radians, (lat1, lng1, lat2, lng2))
     a = (np.sin((lat2 - lat1) / 2) ** 2
@@ -120,7 +120,7 @@ def flag_stale_runs(df: pd.DataFrame) -> pd.Series:
         orders = group["last_stop_order"].dropna()
         if not orders.empty and orders.nunique() > 1:
             continue  # it advanced along the route -> genuinely driving
-        displacement = _haversine_m(
+        displacement = haversine_m(
             group["lat"].min(), group["lng"].min(),
             group["lat"].max(), group["lng"].max(),
         )

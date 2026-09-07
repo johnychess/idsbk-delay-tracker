@@ -51,7 +51,7 @@ the accumulated log into answers about reliability. Initial focus: **line 37**
 collector/   sweep loop (tiling + dedupe), výprava fetch/parse, main daemon
 gtfs/        feed download/load, service-calendar resolver, trip_id→poradie
 match/       heuristic live↔schedule join → matched_runs table
-analysis/    filters + the six analyses + report/plots
+analysis/    filters + the six analyses + report/plots + snapshot/compare
 config.py    all tunables (env-overridable, see .env.example)
 storage.py   SQLite schema (append-only observations, WAL)
 data/        the SQLite DB (on the Railway Volume in production)
@@ -72,11 +72,39 @@ After at least a day of data:
 ```bash
 python -m match.matcher --date 2026-07-01 --line 37   # live↔GTFS join
 python -m analysis.report --line 37                   # report + plots
-# → reports/line37/report.md, *.png, bottleneck_map.html
+# → reports/line37/report.md, *.png, bottleneck_map.html, snapshot.json
 ```
 
 Run the matcher for each collected date (a daily cron/loop is fine — it is
 idempotent). The report needs matched runs for the poradie/vehicle analyses.
+
+### Comparing two windows
+
+`report.md` is for reading; `snapshot.json` beside it is the same figures in a
+form you can diff. Every report run writes one, so a baseline exists without
+anyone remembering to ask for it. To compare, for example, school holidays
+against term time:
+
+```bash
+python -m analysis.report --line 37 --until 2026-08-31 \
+    --label "school holidays 2026" --out reports/holiday
+python -m analysis.report --line 37 --since 2026-09-08 \
+    --label "term 2026" --out reports/term
+
+python -m analysis.snapshot --compare reports/holiday/snapshot.json \
+                                      reports/term/snapshot.json
+```
+
+That prints a per-metric and per-cell delta (headline punctuality, direction ×
+hour, bottleneck segments, inherited/gained, plus data-quality counts as a
+sanity check — a big swing there means a collection problem, not a traffic
+finding). Snapshots built by different code versions are refused rather than
+differenced, so a `SCHEMA_VERSION` bump forces a re-run rather than quietly
+comparing numbers that no longer mean the same thing.
+
+Note that holiday and term windows are not like-for-like by nature: the
+network runs roughly 20% fewer vehicles during school holidays. That is the
+effect being measured, not a defect in the comparison.
 
 ## Deployment (Railway)
 
