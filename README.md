@@ -75,8 +75,17 @@ python -m analysis.report --line 37                   # report + plots
 # → reports/line37/report.md, *.png, bottleneck_map.html, snapshot.json
 ```
 
-Run the matcher for each collected date (a daily cron/loop is fine — it is
-idempotent). The report needs matched runs for the poradie/vehicle analyses.
+The matcher shown above is for backfilling a specific date by hand. In normal
+operation the collector runs it itself: once a night after `MATCH_RUN_HOUR`
+(default 03:00, inside the overnight pause window so it costs no sweeps) it
+matches the last `MATCH_LOOKBACK_DAYS` days for `MATCH_LINES`. It starts at
+yesterday, never today — a day still in progress would be matched against a
+partial set of runs — and `match_date` upserts, so re-covering a day is safe.
+
+This matters because a stale `matched_runs` is invisible: the analyses that
+need it degrade rather than fail. Missed-departure verdicts fall back to
+`served_probably` and the per-vehicle table comes out empty, so collection can
+look perfectly healthy while the matches fall weeks behind.
 
 ### Comparing two windows
 
