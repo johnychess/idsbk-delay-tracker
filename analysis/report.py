@@ -259,7 +259,13 @@ def build_report(db_path: str, line: str, since: str | None, until: str | None,
                 "actually are. **A segment near the top of both tables is a "
                 "real bottleneck; one that tops only the per-stop table is "
                 "explained by stop spacing.** Distances are straight-line "
-                "between fixes, so they understate road distance.\n")
+                "between fixes, so they understate road distance.\n\n"
+                f"Traversals spanning more than {route_profile.MAX_SEGMENT_SPAN} "
+                "stops are excluded: at a ~2-minute fix interval those are "
+                "sampling gaps rather than segments, and straight-line "
+                "distance across them is not a usable denominator. Per-km is "
+                "a ratio of totals (all delay over all distance), not an "
+                "average of per-traversal ratios.\n")
             sections.append(_md_table(per_km))
         map_path = route_profile.bottleneck_map(
             bottlenecks, os.path.join(out_dir, "bottleneck_map.html"))
