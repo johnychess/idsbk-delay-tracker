@@ -8,6 +8,13 @@ bottlenecks; the GPS midpoint localises each to a spot (junction / light).
 Granularity caveat: positions arrive ~every 2 minutes, so a fast vehicle
 can skip several stops between observations — the increment is then spread
 over a multi-stop segment (span > 1). That is inherent to the source.
+
+Ranking caveat, and why there are two rankings: minutes-per-STOP flatters
+long inter-stop gaps. A segment that covers 2 km of open road is expected to
+cost more delay than one crossing 200 m of housing estate, so a high
+min/stop can mean "this is slow" or merely "these two stops are far apart".
+Minutes-per-KM separates the two, and a segment that ranks high on both is a
+genuine bottleneck rather than an artefact of stop spacing.
 """
 
 from __future__ import annotations
@@ -16,10 +23,21 @@ import pandas as pd
 
 from analysis import filters
 
+# Below this the straight-line distance between two fixes is comparable to GPS
+# noise, so min/km explodes on a rounding error. Such traversals still count
+# towards min/stop; they are simply excluded from the per-km statistic.
+MIN_SEGMENT_KM = 0.05
+
 
 def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
     """One row per observed segment traversal:
-    (line, direction, from_order, to_order, delay_increment, mid lat/lng)."""
+    (line, direction, from_order, to_order, delay_increment, mid lat/lng,
+    distance_km).
+
+    distance_km is the straight-line distance between the two fixes, so it
+    UNDER-states the road distance actually driven (more so on a bend). It is
+    a normaliser for comparing segments against each other, not a measurement
+    of route length."""
     if df.empty:
         return pd.DataFrame()
     df = df.dropna(subset=["delay_minutes", "last_stop_order"]).copy()
@@ -40,6 +58,8 @@ def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
                     "delay_increment": obs["delay_minutes"] - prev["delay_minutes"],
                     "mid_lat": (obs["lat"] + prev["lat"]) / 2,
                     "mid_lng": (obs["lng"] + prev["lng"]) / 2,
+                    "distance_km": filters.haversine_m(
+                        prev["lat"], prev["lng"], obs["lat"], obs["lng"]) / 1000.0,
                     "hour": obs["hour"],
                     "service_date": service_date,
                     "vehicle_id": vehicle_id,
@@ -50,22 +70,57 @@ def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
 
 def bottleneck_table(increments: pd.DataFrame,
                      min_n: int = 10) -> pd.DataFrame:
-    """Rank segments by mean delay increment (per stop traversed, so
-    multi-stop spans don't dominate)."""
+    """Rank segments by mean delay increment per stop traversed (so multi-stop
+    spans don't dominate), alongside the same loss normalised by DISTANCE.
+
+    `mean_increment` (min/stop) is the headline ranking, kept as-is. But a
+    segment can top it simply by spanning more ground, so the table also
+    carries `km_per_stop` — how far apart these stops actually are — and
+    `increment_per_km`. Read them together: high min/stop with ordinary
+    km_per_stop is a real bottleneck; high min/stop with a large km_per_stop
+    and unremarkable min/km is just a long gap between stops."""
     if increments.empty:
         return increments
     inc = increments.copy()
     inc["increment_per_stop"] = inc["delay_increment"] / inc["span"]
+    if "distance_km" not in inc.columns:
+        inc["distance_km"] = float("nan")
+    inc["km_per_stop_row"] = inc["distance_km"] / inc["span"]
+    # Only traversals long enough for the distance to mean something feed the
+    # per-km statistic; the rest would divide a real delay by GPS jitter.
+    measurable = inc["distance_km"] >= MIN_SEGMENT_KM
+    inc["increment_per_km_row"] = (
+        inc["delay_increment"] / inc["distance_km"]).where(measurable)
+
     grouped = inc.groupby(["line", "direction", "from_order", "to_order"])
     table = grouped.agg(
         n=("delay_increment", "count"),
         mean_increment=("increment_per_stop", "mean"),
         total_mean=("delay_increment", "mean"),
+        km_per_stop=("km_per_stop_row", "mean"),
+        increment_per_km=("increment_per_km_row", "mean"),
+        n_km=("increment_per_km_row", "count"),
         mid_lat=("mid_lat", "mean"),
         mid_lng=("mid_lng", "mean"),
     ).reset_index()
     table = table[table["n"] >= min_n]
     return table.sort_values("mean_increment", ascending=False).round(3)
+
+
+def by_distance(table: pd.DataFrame, min_n: int = 10,
+                top: int = 15) -> pd.DataFrame:
+    """The same segments re-ranked by delay gained per KILOMETRE.
+
+    Segments appearing near the top of both this and `bottleneck_table` are
+    the ones worth acting on. A segment that only tops the min/stop ranking is
+    explained by stop spacing, not by anything happening on the road."""
+    if table is None or table.empty or "increment_per_km" not in table.columns:
+        return pd.DataFrame()
+    solid = table[(table.get("n_km", 0) >= min_n)
+                  & table["increment_per_km"].notna()]
+    if solid.empty:
+        return pd.DataFrame()
+    return solid.sort_values("increment_per_km", ascending=False).head(top)
 
 
 def bottleneck_map(table: pd.DataFrame, out_path: str) -> str | None:
