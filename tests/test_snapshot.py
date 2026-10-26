@@ -124,6 +124,42 @@ def test_report_writes_a_snapshot_beside_the_markdown(tmp_path):
     snap = snapshot.load(str(tmp_path / "out" / "snapshot.json"))
     assert snap["label"] == "holiday"
     assert snap["headline"]["n"] == 2
+    # The data-quality block is the section that is supposed to catch hollow
+    # output, so an empty one is the failure it exists to detect. The original
+    # test asserted only the label and headline, which is how a missing block
+    # could have shipped unnoticed.
+    assert snap["data_quality"], "filter counts must reach the snapshot"
+    assert snap["data_quality"]["raw"] == 2
+    assert snap["data_quality"]["kept"] == 2
+    for key in ("dropped_stale_parked", "dropped_dead_trip",
+                "dropped_implausible_delay", "trips", "runs"):
+        assert key in snap["data_quality"], f"{key} missing from data_quality"
+
+
+def test_compare_renders_the_data_quality_section(tmp_path):
+    """The compare's data-quality table must actually have rows — it is the
+    collection-health check, and an empty one hides exactly what it watches
+    for."""
+    conn = make_db(str(tmp_path / "t.sqlite"))
+    _obs(conn, [
+        obs_row("2026-07-06T05:00:00Z", 1, last_stop_order=1, delay=0),
+        obs_row("2026-07-06T05:04:00Z", 1, last_stop_order=2, delay=1),
+    ])
+    before = snapshot.build_snapshot(conn, "37", None, None, label="a")
+    _obs(conn, [
+        obs_row("2026-07-07T05:00:00Z", 2, last_stop_order=1, delay=4),
+        obs_row("2026-07-07T05:04:00Z", 2, last_stop_order=2, delay=6),
+    ])
+    after = snapshot.build_snapshot(conn, "37", None, None, label="b")
+
+    dq = snapshot.compare(before, after)["data_quality"]
+    assert not dq.empty, "data-quality comparison rendered no rows"
+    assert set(dq["metric"]) >= {"raw", "kept"}
+    assert dq.set_index("metric").loc["raw", "delta"] == 2
+
+    text = snapshot.compare_markdown(before, after)
+    section = text.split("## Data quality")[1]
+    assert "_no comparable rows_" not in section
 
 
 # --- bottleneck distance normalisation -------------------------------------
@@ -174,6 +210,40 @@ def test_gps_jitter_is_excluded_from_the_per_km_statistic():
     assert row["n_km"] == 0               # excluded from per km
     assert pd.isna(row["increment_per_km"])
     assert route_profile.by_distance(table).empty
+
+
+def test_multi_stop_sampling_gaps_are_not_segments():
+    """The real Most SNP 11->22 row: eleven stops between two fixes is a
+    sampling gap, not a place a rider experiences. Grouping it as a segment
+    also breaks the per-km denominator, because straight-line distance across
+    eleven stops means nothing on a route that curves back."""
+    gap = [_traversal(11, 22, -7.0, 48.150, 17.100, 48.190, 17.160)
+           for _ in range(12)]
+    assert route_profile.bottleneck_table(pd.DataFrame(gap)).empty
+    # a two-stop span is a segment and survives
+    real = [_traversal(11, 13, -7.0, 48.150, 17.100, 48.190, 17.160)
+            for _ in range(12)]
+    assert not route_profile.bottleneck_table(pd.DataFrame(real)).empty
+
+
+def test_per_km_cannot_invert_the_sign_of_per_stop():
+    """Reproduces the observed contradiction: a segment reported -0.38 min/stop
+    and +3.195 min/km at the same time. A mean of per-row ratios let three
+    traversals with a tiny straight-line denominator outvote eight long ones.
+    A ratio of totals cannot do that — losing time overall must read as losing
+    time per kilometre."""
+    long_recovering = [_traversal(11, 13, -7.0, 48.150, 17.100, 48.190, 17.160)
+                       for _ in range(8)]
+    short_looping = [_traversal(11, 13, +2.0, 48.150, 17.100, 48.1505, 17.1012)
+                     for _ in range(3)]
+    row = route_profile.bottleneck_table(
+        pd.DataFrame(long_recovering + short_looping)).iloc[0]
+
+    assert row["mean_increment"] < 0
+    assert row["increment_per_km"] < 0, (
+        "per-km inverted the sign of per-stop: "
+        f"{row['mean_increment']} vs {row['increment_per_km']}")
+    assert row["n_km"] == 11
 
 
 def test_increments_carry_distance_and_survive_missing_column():

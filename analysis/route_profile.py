@@ -28,6 +28,21 @@ from analysis import filters
 # towards min/stop; they are simply excluded from the per-km statistic.
 MIN_SEGMENT_KM = 0.05
 
+# A traversal covering more stops than this is a SAMPLING GAP, not a segment.
+# The ~2-minute fix interval means a vehicle can cover a dozen stops between
+# reports; grouping those under one (from_order, to_order) key invents a
+# "segment" that spans a third of the route and that no rider experiences as
+# one place. Worse, they break the per-km denominator: straight-line distance
+# between two fixes eleven stops apart is meaningless on a route that curves
+# or doubles back, so a long hop can end up close to where it started and
+# divide a real delay by a few hundred metres.
+#
+# Line 37 real case (Sep 2026): Most SNP 11->22, n=11, -0.38 min/stop but
+# +3.195 min/km — a segment losing time per stop and apparently gaining it per
+# kilometre. Both causes are fixed here: spans this long are excluded, and
+# per-km is a ratio of totals rather than a mean of per-row ratios.
+MAX_SEGMENT_SPAN = 3
+
 
 def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
     """One row per observed segment traversal:
@@ -68,20 +83,34 @@ def segment_increments(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def bottleneck_table(increments: pd.DataFrame,
-                     min_n: int = 10) -> pd.DataFrame:
+def bottleneck_table(increments: pd.DataFrame, min_n: int = 10,
+                     max_span: int = MAX_SEGMENT_SPAN) -> pd.DataFrame:
     """Rank segments by mean delay increment per stop traversed (so multi-stop
     spans don't dominate), alongside the same loss normalised by DISTANCE.
 
-    `mean_increment` (min/stop) is the headline ranking, kept as-is. But a
-    segment can top it simply by spanning more ground, so the table also
-    carries `km_per_stop` — how far apart these stops actually are — and
-    `increment_per_km`. Read them together: high min/stop with ordinary
-    km_per_stop is a real bottleneck; high min/stop with a large km_per_stop
-    and unremarkable min/km is just a long gap between stops."""
+    `mean_increment` (min/stop) is the headline ranking. A segment can top it
+    simply by spanning more ground, so the table also carries `km_per_stop` —
+    how far apart these stops actually are — and `increment_per_km`. Read them
+    together: high min/stop with ordinary km_per_stop is a real bottleneck;
+    high min/stop with a large km_per_stop and unremarkable min/km is just a
+    long gap between stops.
+
+    Traversals spanning more than `max_span` stops are dropped: they are
+    sampling gaps rather than segments, and their straight-line distance is
+    not a usable denominator (see MAX_SEGMENT_SPAN).
+
+    `increment_per_km` is a ratio of TOTALS — all delay gained over all
+    distance covered — not a mean of per-row ratios. Per-row ratios let a
+    single traversal with a small denominator dominate the group and can
+    invert its sign against `mean_increment`, which is exactly what the
+    Most SNP 11->22 row did."""
     if increments.empty:
         return increments
     inc = increments.copy()
+    if "span" in inc.columns and max_span:
+        inc = inc[inc["span"] <= max_span]
+    if inc.empty:
+        return pd.DataFrame()
     inc["increment_per_stop"] = inc["delay_increment"] / inc["span"]
     if "distance_km" not in inc.columns:
         inc["distance_km"] = float("nan")
@@ -89,8 +118,8 @@ def bottleneck_table(increments: pd.DataFrame,
     # Only traversals long enough for the distance to mean something feed the
     # per-km statistic; the rest would divide a real delay by GPS jitter.
     measurable = inc["distance_km"] >= MIN_SEGMENT_KM
-    inc["increment_per_km_row"] = (
-        inc["delay_increment"] / inc["distance_km"]).where(measurable)
+    inc["km_measurable"] = inc["distance_km"].where(measurable)
+    inc["delay_measurable"] = inc["delay_increment"].where(measurable)
 
     grouped = inc.groupby(["line", "direction", "from_order", "to_order"])
     table = grouped.agg(
@@ -98,11 +127,15 @@ def bottleneck_table(increments: pd.DataFrame,
         mean_increment=("increment_per_stop", "mean"),
         total_mean=("delay_increment", "mean"),
         km_per_stop=("km_per_stop_row", "mean"),
-        increment_per_km=("increment_per_km_row", "mean"),
-        n_km=("increment_per_km_row", "count"),
+        _delay_total=("delay_measurable", "sum"),
+        _km_total=("km_measurable", "sum"),
+        n_km=("km_measurable", "count"),
         mid_lat=("mid_lat", "mean"),
         mid_lng=("mid_lng", "mean"),
     ).reset_index()
+    table["increment_per_km"] = (
+        table["_delay_total"] / table["_km_total"]).where(table["n_km"] > 0)
+    table = table.drop(columns=["_delay_total", "_km_total"])
     table = table[table["n"] >= min_n]
     return table.sort_values("mean_increment", ascending=False).round(3)
 
