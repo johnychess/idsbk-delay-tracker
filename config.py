@@ -149,6 +149,34 @@ VYPRAVA_FETCH_HOUR = int(os.environ.get("VYPRAVA_FETCH_HOUR", "20"))
 # re-fetch it each day and overwrite with the verified roster once it lands.
 VYPRAVA_LOOKBACK_DAYS = int(os.environ.get("VYPRAVA_LOOKBACK_DAYS", "5"))
 
+# --------------------------------------------------------------------------
+# Nightly live <-> schedule matching
+# --------------------------------------------------------------------------
+
+# The matcher used to be a manual step, so matched_runs quietly fell 40 days
+# behind the observations while collection looked perfectly healthy. Nothing
+# surfaced it, because the analyses that need matches degrade rather than
+# fail: missed-departure verdicts fall back to "served_probably" and the
+# per-vehicle table just comes out empty. Run it from the collector instead.
+MATCH_ENABLED = os.environ.get("MATCH_ENABLED", "1") == "1"
+
+# Local hour to run the pass at. The default falls inside the overnight pause
+# window, where the loop already skips sweeping but still runs its daily
+# passes — so a slow match costs no vehicle observations.
+MATCH_RUN_HOUR = int(os.environ.get("MATCH_RUN_HOUR", "3"))
+
+# Days back to (re-)match each night. match_date upserts on
+# (service_date, vehicle_id, segment), so re-matching a day is idempotent;
+# the lookback exists to pick up days whose GTFS feed landed late and days
+# missed while the collector was down.
+MATCH_LOOKBACK_DAYS = int(os.environ.get("MATCH_LOOKBACK_DAYS", "3"))
+
+# Lines to match, comma-separated. Empty means every line, which costs far
+# more per night than the tracked line does (~5 s/day for line 37 over ~170
+# runs, against ~600 vehicles network-wide).
+MATCH_LINES = [s.strip() for s
+               in os.environ.get("MATCH_LINES", "37").split(",") if s.strip()]
+
 # A day is never trusted as "confirmed" until it is at least this many days
 # old, even if the "not yet verified" note is absent. Guards against imhd
 # rewording the note (which would otherwise make every page read as verified

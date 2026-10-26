@@ -4,7 +4,8 @@
 
 Every SWEEP_INTERVAL_S (default 120 s): sweep all tiling points, dedupe,
 append observation rows. Once per day (after VYPRAVA_FETCH_HOUR local):
-fetch the imhd.sk výprava table. Weekly: refresh the GTFS feed.
+fetch the imhd.sk výprava table. Once per night (after MATCH_RUN_HOUR):
+match recent days against the GTFS schedule. Weekly: refresh the GTFS feed.
 
 Resilience: every unit of work is wrapped in try/except and the DB is
 append-only, so a crash or redeploy loses at most one sweep and the loop
@@ -24,6 +25,7 @@ import storage
 from collector import sweep as sweep_mod
 from collector import vyprava as vyprava_mod
 from gtfs import loader as gtfs_loader
+from match import matcher
 
 log = logging.getLogger("collector")
 
@@ -85,6 +87,39 @@ def _maybe_fetch_vyprava(conn, session) -> None:
     storage.set_meta(conn, checked_marker, "1")
 
 
+def _maybe_match_recent(conn) -> None:
+    """Once a day, join recent observations to the GTFS schedule.
+
+    Matching was a manual step until now, which is exactly why it fell 40 days
+    behind without anyone noticing: the analyses that depend on it degrade
+    quietly rather than failing, so a stale matched_runs looks like healthy
+    collection right up until the missed-departure and per-vehicle sections
+    turn out to be hollow.
+
+    Starts at yesterday, never today — a day still in progress would be
+    matched against a partial set of runs. match_date upserts, so re-covering
+    a day already done is cheap and safe; that is what lets the lookback pick
+    up days whose feed arrived late or that were missed during downtime."""
+    if not config.MATCH_ENABLED:
+        return
+    now = _now_local()
+    if now.hour < config.MATCH_RUN_HOUR:
+        return
+    checked_marker = f"match_checked_{now.date().isoformat()}"
+    if storage.get_meta(conn, checked_marker):
+        return  # already did tonight's pass
+
+    for delta in range(1, config.MATCH_LOOKBACK_DAYS + 1):
+        day = now.date() - timedelta(days=delta)
+        for line in (config.MATCH_LINES or [None]):
+            try:
+                matcher.match_date(conn, day, line=line)
+            except Exception:
+                log.exception("matching %s line=%s failed; will retry tomorrow",
+                              day, line or "all")
+    storage.set_meta(conn, checked_marker, "1")
+
+
 def _maybe_refresh_gtfs(conn) -> None:
     last = storage.get_meta(conn, "gtfs_downloaded_at")
     if last:
@@ -138,6 +173,7 @@ def main() -> None:
                 log.exception("sweep failed; continuing")
 
         _maybe_fetch_vyprava(conn, session)
+        _maybe_match_recent(conn)
         _maybe_refresh_gtfs(conn)
 
         elapsed = time.monotonic() - cycle_started
